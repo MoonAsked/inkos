@@ -95,10 +95,6 @@ export async function runChapterReviewCycle(params: {
     right?: ChapterReviewCycleUsage,
   ) => ChapterReviewCycleUsage;
   readonly analyzeAITells: (content: string) => { issues: ReadonlyArray<AuditIssue> };
-  readonly analyzeSensitiveWords: (content: string) => {
-    found: ReadonlyArray<{ severity: string }>;
-    issues: ReadonlyArray<AuditIssue>;
-  };
   /** Re-run deterministic post-write checks (chapter-ref, paragraph shape, etc.) on any content. */
   readonly runPostWriteChecks?: (content: string) => ReadonlyArray<AuditIssue>;
   readonly logWarn: (message: { zh: string; en: string }) => void;
@@ -166,8 +162,6 @@ export async function runChapterReviewCycle(params: {
     );
     totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
     const aiTellsResult = params.analyzeAITells(content);
-    const sensitiveResult = params.analyzeSensitiveWords(content);
-    const hasBlockedWords = sensitiveResult.found.some((item) => item.severity === "block");
     const wordCount = countChapterLength(content, params.lengthSpec.countingMode);
     const lengthInRange = !isOutsideSoftRange(wordCount, params.lengthSpec);
 
@@ -180,7 +174,6 @@ export async function runChapterReviewCycle(params: {
     const allIssues: AuditIssue[] = [
       ...llmAudit.issues,
       ...aiTellsResult.issues,
-      ...sensitiveResult.issues,
       ...postWriteIssues,
     ];
 
@@ -189,7 +182,7 @@ export async function runChapterReviewCycle(params: {
 
     const hasPostWriteCritical = postWriteIssues.some((i) => i.severity === "critical");
     const auditResult: AuditResult = {
-      passed: (hasBlockedWords || hasPostWriteCritical) ? false : llmAudit.passed,
+      passed: hasPostWriteCritical ? false : llmAudit.passed,
       issues: allIssues,
       summary: llmAudit.summary,
       overallScore: llmAudit.overallScore,

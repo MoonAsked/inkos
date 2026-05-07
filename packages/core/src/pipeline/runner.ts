@@ -19,7 +19,6 @@ import { RadarAgent } from "../agents/radar.js";
 import type { RadarSource } from "../agents/radar-source.js";
 import { readGenreProfile } from "../agents/rules-reader.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
-import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
 import { StateManager } from "../state/manager.js";
 import { MemoryDB, type Fact } from "../state/memory-db.js";
 import { dispatchNotification, dispatchWebhookEvent } from "../notify/dispatcher.js";
@@ -1577,7 +1576,6 @@ export class PipelineRunner {
         this.assertChapterContentNotEmpty(content, chapterNumber, stage),
       addUsage: PipelineRunner.addUsage,
       analyzeAITells: (content) => analyzeAITells(content, pipelineLang),
-      analyzeSensitiveWords: (content) => analyzeSensitiveWords(content, undefined, pipelineLang),
       runPostWriteChecks: (content) => {
         const baseIssues = postWriteValidate(content, gp, parsedBookRules, pipelineLang)
           .filter((v) => v.severity === "error")
@@ -3328,18 +3326,15 @@ ${matrix}`,
       params.auditOptions,
     );
     const aiTells = analyzeAITells(params.chapterContent, params.language);
-    const sensitiveResult = analyzeSensitiveWords(params.chapterContent, undefined, params.language);
     const longSpanFatigue = await analyzeLongSpanFatigue({
       bookDir: params.bookDir,
       chapterNumber: params.chapterNumber,
       chapterContent: params.chapterContent,
       language: params.language,
     });
-    const hasBlockedWords = sensitiveResult.found.some((f) => f.severity === "block");
     const issues: ReadonlyArray<AuditIssue> = [
       ...llmAudit.issues,
       ...aiTells.issues,
-      ...sensitiveResult.issues,
       ...longSpanFatigue.issues,
     ];
     // revisionBlockingIssues excludes long-span-fatigue issues by
@@ -3348,12 +3343,11 @@ ${matrix}`,
     const revisionBlockingIssues: ReadonlyArray<AuditIssue> = [
       ...llmAudit.issues,
       ...aiTells.issues,
-      ...sensitiveResult.issues,
     ];
 
     return {
       auditResult: {
-        passed: hasBlockedWords ? false : llmAudit.passed,
+        passed: llmAudit.passed,
         issues,
         summary: llmAudit.summary,
         tokenUsage: llmAudit.tokenUsage,
