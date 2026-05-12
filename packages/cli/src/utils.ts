@@ -133,10 +133,14 @@ export function buildPipelineConfig(
   const logger = hasLogging ? createLogger({ tag: "inkos", sinks }) : undefined;
 
   const onStreamProgress = hasLogging
-    ? (progress: { readonly elapsedMs: number; readonly totalChars: number; readonly chineseChars: number; readonly status: string }) => {
+    ? (progress: { readonly elapsedMs: number; readonly totalChars: number; readonly chineseChars: number; readonly thinkingChars: number; readonly status: string; readonly label?: string }) => {
         if (progress.status === "streaming") {
+          const now = new Date();
+          const timeStr = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+          const labelInfo = progress.label ? `[${progress.label}] ` : "";
+          const thinkingInfo = progress.thinkingChars > 0 ? ` | thinking ${progress.thinkingChars} chars` : "";
           logger?.info(
-            `streaming ${Math.round(progress.elapsedMs / 1000)}s, ${progress.totalChars} chars (${progress.chineseChars} CJK)`,
+            `[${timeStr}] ${labelInfo}streaming ${Math.round(progress.elapsedMs / 1000)}s, ${progress.totalChars} chars (${progress.chineseChars} CJK)${thinkingInfo}`,
           );
         }
       }

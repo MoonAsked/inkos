@@ -76,11 +76,24 @@ importCommand
       const book = await state.loadBookConfig(bookId);
       const language = resolveCliLanguage(book.language);
       const existingChapterCount = (await state.getNextChapterNumber(bookId)) - 1;
-      if (existingChapterCount > 0 && !opts.resumeFrom) {
-        throw new Error(
-          `Book "${bookId}" already has ${existingChapterCount} chapter(s). ` +
-          `Use --resume-from <n> to append, or delete existing chapters first.`
-        );
+      if (existingChapterCount > 0) {
+        if (!opts.resumeFrom) {
+          // Auto-detect progress: resume from the chapter after the last imported one
+          opts.resumeFrom = existingChapterCount + 1;
+          log(`Book "${bookId}" already has ${existingChapterCount} chapter(s). Auto-resuming from chapter ${opts.resumeFrom}.`);
+        } else if (opts.resumeFrom <= existingChapterCount) {
+          // Warn that existing chapters will be overwritten
+          const overwriteCount = existingChapterCount - opts.resumeFrom + 1;
+          log(`Warning: --resume-from ${opts.resumeFrom} will re-analyze and overwrite ${overwriteCount} existing chapter(s) (${opts.resumeFrom}-${existingChapterCount}), then continue with new chapters.`);
+        }
+      } else if (!opts.resumeFrom) {
+        // No chapters imported yet, but foundation may already exist (step 1 completed, step 2 interrupted)
+        const bookDir = state.bookDir(bookId);
+        const foundationExists = await state.isCompleteBookDirectory(bookDir);
+        if (foundationExists) {
+          opts.resumeFrom = 1;
+          log(`Book "${bookId}" has no imported chapters but foundation already exists. Resuming from chapter 1 (skipping foundation generation).`);
+        }
       }
 
       const fromPath = resolve(opts.from);

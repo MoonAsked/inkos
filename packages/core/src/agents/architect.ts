@@ -142,16 +142,34 @@ export class ArchitectAgent extends BaseAgent {
     const langPrefix = resolvedLanguage === "en"
       ? `【LANGUAGE OVERRIDE】ALL output (story_frame, volume_map, roles, book_rules, pending_hooks) MUST be written in English. Character names, place names, and all prose must be in English. The === SECTION: === tags remain unchanged. Do NOT emit rhythm_principles or current_state sections — rhythm principles live inside the last paragraph of volume_map; environment/era anchors (when relevant) are woven into story_frame's world-tonal-ground paragraph.\n\n`
       : "";
-    const userMessage = resolvedLanguage === "en"
+    let userMessage = resolvedLanguage === "en"
       ? `Generate the complete foundation for a ${gp.name} novel titled "${book.title}". Write everything in English.`
       : `请为标题为"${book.title}"的${gp.name}小说生成完整基础设定。`;
 
-    const response = await this.chat([
-      { role: "system", content: langPrefix + systemPrompt + revisePrompt },
-      { role: "user", content: userMessage },
-    ], { temperature: 0.8 });
+    const maxParseRetries = 2;
+    for (let attempt = 0; attempt <= maxParseRetries; attempt++) {
+      const response = await this.chat([
+        { role: "system", content: langPrefix + systemPrompt + revisePrompt },
+        { role: "user", content: userMessage },
+      ], { maxTokens: 20480, temperature: 0.8 });
 
-    return this.parseSections(response.content, resolvedLanguage);
+      try {
+        return this.parseSections(response.content, resolvedLanguage);
+      } catch (parseError: any) {
+        const msg = parseError?.message ?? "";
+        const isMissingSections = msg.includes("missing required section");
+        if (isMissingSections && attempt < maxParseRetries) {
+          this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): ${msg} — retrying with feedback`);
+          const retryFeedback = resolvedLanguage === "en"
+            ? `\n\n[IMPORTANT — your previous output was missing required sections. You MUST produce ALL 5 sections: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===. Do not stop until all 5 are complete.]`
+            : `\n\n[重要——你上次的输出缺少必要 section。必须输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。不要在完成前停止。]`;
+          userMessage += retryFeedback;
+          continue;
+        }
+        throw parseError;
+      }
+    }
+    throw new Error("Unexpected: generateFoundation retry loop exited without result");
   }
 
   private buildRevisePrompt(reviseFrom: {
@@ -649,8 +667,11 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     if (!bookRules) missing.push("book_rules");
     if (!pendingHooksRaw) missing.push("pending_hooks");
     if (missing.length > 0) {
+      const foundSections = [...parsedSections.keys()].filter(k => k);
+      const contentPreview = content.length > 300 ? content.slice(0, 300) + "…" : content;
       throw new Error(
-        `Architect output missing required section${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}`,
+        `Architect output missing required section${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}` +
+        ` (found: [${foundSections.join(", ")}], raw length: ${content.length}, preview: ${JSON.stringify(contentPreview)})`,
       );
     }
 
@@ -831,8 +852,47 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     // book_rules.md becomes a compat shim.
     const { frontmatter: bookRulesFrontmatter, body: bookRulesBody } =
       extractYamlFrontmatter(output.bookRules);
-    const storyFrame = bookRulesFrontmatter
-      ? `${bookRulesFrontmatter}\n\n${storyFrameBody.trim()}\n`
+    // Fallback: if extractYamlFrontmatter failed (LLM wrapped YAML in code block
+    // without --- delimiters, or used a non-standard format), try to recover the
+    // YAML content and wrap it in --- delimiters so story_frame.md gets a valid
+    // frontmatter. This is critical — without frontmatter, readBookRules() returns
+    // null, which breaks chapter-analyzer and causes empty LLM responses in Step 2.
+    let resolvedFrontmatter = bookRulesFrontmatter;
+    if (!resolvedFrontmatter && output.bookRules?.trim()) {
+      const strippedRules = output.bookRules
+        .replace(/^```(?:md|markdown|yaml|yml)?\s*\n/, "")
+        .replace(/\n```\s*$/, "")
+        .trim();
+      // If the stripped content looks like YAML (starts with --- or a YAML key),
+      // wrap it in --- delimiters.
+      if (strippedRules.startsWith("---")) {
+        // Already has --- but maybe malformed — try as-is
+        resolvedFrontmatter = strippedRules.startsWith("---\n")
+          ? `---\n${strippedRules.slice(4).replace(/\n---\s*$/, "").trim()}\n---`
+          : null;
+      } else if (/^[a-zA-Z_\u4e00-\u9fff]/.test(strippedRules) && strippedRules.includes(":")) {
+        // Looks like bare YAML (key: value pairs) — wrap in ---
+        resolvedFrontmatter = `---\n${strippedRules}\n---`;
+      }
+      if (resolvedFrontmatter) {
+        this.log?.warn(`[architect] extractYamlFrontmatter returned null for book_rules — recovered YAML and built frontmatter (${resolvedFrontmatter.length} chars)`);
+      } else {
+        // Last resort: generate a minimal default frontmatter so readBookRules()
+        // doesn't return null. Without frontmatter, chapter-analyzer and planner
+        // break in Step 2. Extract protagonist name from roles if available.
+        const protagonist = roles.find(r => r.tier === "major");
+        const defaultFrontmatter = [
+          "version: \"1.0\"",
+          protagonist ? `protagonist:\n  name: "${protagonist.name}"` : "",
+          "genreLock:\n  primary: \"都市\"\n  forbidden: []",
+          "prohibitions: []",
+        ].filter(Boolean).join("\n");
+        resolvedFrontmatter = `---\n${defaultFrontmatter}\n---`;
+        this.log?.warn(`[architect] extractYamlFrontmatter returned null for book_rules and could not recover YAML — generated minimal default frontmatter so readBookRules() won't return null`);
+      }
+    }
+    const storyFrame = resolvedFrontmatter
+      ? `${resolvedFrontmatter}\n\n${storyFrameBody.trim()}\n`
       : storyFrameBody;
 
     // Phase 5 primary prose files
@@ -1009,16 +1069,64 @@ ${continuationDirective}
 
 所有 prose 必须从资料包中推导，不得臆造。若资料包声明为压缩包，把章节目录和正文摘录当作基础设定证据；完整章节会在后续回放阶段逐章进入 truth files。volume_map 中，已有章节作为"回顾段"（一段散文），续写部分写到章级 prose。伏笔识别以资料包提供的证据为准，尽量完整。`;
 
-    const userMessage = resolvedLanguage === "en"
-      ? `Generate the complete foundation for an imported ${gp.name} novel titled "${book.title}". Write everything in English.\n\n${chaptersText}`
-      : `以下是《${book.title}》的已有正文资料包，请从中反向推导完整基础设定：\n\n${chaptersText}`;
+    // Truncate chaptersText if it exceeds the context window.
+    // CJK text: ~1.5 chars/token; reserve tokens for system prompt + maxTokens output.
+    // Use only 70% of context window to leave headroom for KV cache and prompt processing.
+    const contextWindow = this.ctx.client._piModel?.contextWindow ?? 128_000;
+    const usableContext = Math.floor(contextWindow * 0.7);
+    const reservedForSystemAndOutput = (systemPrompt.length / 1.5) + 20480 + 4096; // system + output + safety margin
+    const maxUserChars = Math.floor((usableContext - reservedForSystemAndOutput) * 1.5);
+    let truncated = false;
+    let safeText = chaptersText;
+    if (chaptersText.length > maxUserChars && maxUserChars > 0) {
+      truncated = true;
+      // Keep the first 60% and last 30% of the allowed budget; skip the middle.
+      // This preserves opening world-building and ending state/hooks.
+      const headLen = Math.floor(maxUserChars * 0.6);
+      const tailLen = Math.floor(maxUserChars * 0.3);
+      const skipNotice = resolvedLanguage === "en"
+        ? "\n\n--- [MIDDLE SECTION OMITTED — too long for context window] ---\n\n"
+        : "\n\n--- [中间部分已省略——超出上下文窗口] ---\n\n";
+      safeText = chaptersText.slice(0, headLen) + skipNotice + chaptersText.slice(chaptersText.length - tailLen);
+      this.log?.info(`[architect] Truncated import text: ${chaptersText.length} → ${safeText.length} chars (contextWindow=${contextWindow}, maxUserChars=${maxUserChars})`);
+    }
 
-    const response = await this.chat([
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ], { temperature: 0.5 });
+    const truncationNote = truncated
+      ? (resolvedLanguage === "en"
+          ? "\n\nNote: The source text was too long for the context window and has been truncated. The opening and ending sections are preserved; the middle section is omitted. Infer the middle from the surrounding context."
+          : "\n\n注意：原文过长，已截断以适应上下文窗口。保留了开头和结尾部分，中间部分已省略。请根据前后文推断中间内容。")
+      : "";
 
-    return this.parseSections(response.content, resolvedLanguage);
+    let userMessage = resolvedLanguage === "en"
+      ? `Generate the complete foundation for an imported ${gp.name} novel titled "${book.title}". Write everything in English.\n\n${safeText}${truncationNote}`
+      : `以下是《${book.title}》的已有正文资料包，请从中反向推导完整基础设定：\n\n${safeText}${truncationNote}`;
+
+    const maxParseRetries = 2;
+    for (let attempt = 0; attempt <= maxParseRetries; attempt++) {
+      const response = await this.chat([
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ], { maxTokens: 20480, temperature: 0.5 });
+
+      try {
+        return this.parseSections(response.content, resolvedLanguage);
+      } catch (parseError: any) {
+        const msg = parseError?.message ?? "";
+        const isMissingSections = msg.includes("missing required section");
+        if (isMissingSections && attempt < maxParseRetries) {
+          this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): ${msg} — retrying with feedback`);
+          // Append feedback about missing sections to the user message for the retry
+          const retryFeedback = resolvedLanguage === "en"
+            ? `\n\n[IMPORTANT — your previous output was missing required sections. You MUST produce ALL 5 sections: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===. Do not stop until all 5 are complete.]`
+            : `\n\n[重要——你上次的输出缺少必要 section。必须输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。不要在完成前停止。]`;
+          userMessage += retryFeedback;
+          continue;
+        }
+        throw parseError;
+      }
+    }
+    // Unreachable, but TypeScript needs it
+    throw new Error("Unexpected: generateFoundationFromImport retry loop exited without result");
   }
 
   async generateFanficFoundation(
@@ -1101,8 +1209,31 @@ ${trimmed}\n`;
 ${trimmed}\n`;
   }
 
+  private static readonly CN_SECTION_MAP: Record<string, string> = {
+    "故事框架": "story_frame",
+    "故事设定": "story_frame",
+    "卷纲": "volume_map",
+    "卷宗": "volume_map",
+    "分卷大纲": "volume_map",
+    "角色设定": "roles",
+    "角色": "roles",
+    "书籍规则": "book_rules",
+    "规则": "book_rules",
+    "待回收伏笔": "pending_hooks",
+    "伏笔": "pending_hooks",
+    "当前状态": "current_state",
+    "节奏原则": "rhythm_principles",
+    "故事圣经": "story_bible",
+    "分卷概要": "volume_outline",
+  };
+
   private normalizeSectionName(name: string): string {
-    return name
+    const trimmed = name.trim();
+    // Check Chinese name mapping first (exact match)
+    const cnMapped = ArchitectAgent.CN_SECTION_MAP[trimmed];
+    if (cnMapped) return cnMapped;
+
+    return trimmed
       .normalize("NFKC")
       .toLowerCase()
       .replace(/[`"'*_]/g, " ")

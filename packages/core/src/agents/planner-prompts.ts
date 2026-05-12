@@ -96,7 +96,7 @@ defer:
 
 ## 输出要求
 
-- goal 字段不超过 50 字
+- goal 字段不超过 80 字
 - threadRefs 是 YAML 数组，内容是从输入的 pending_hooks/subplot_board 中挑出的 id
 - 每个二级标题（##）必须出现，内容不能为空
 - 不要在 memo 里提方法论术语（"情绪缺口"、"cyclePhase"、"蓄压"等）——直接用这本书的人物、地点、事件说事
@@ -200,7 +200,7 @@ defer:
 
 ## Output requirements
 
-- goal field is no more than 50 characters
+- goal field is no more than 80 characters
 - threadRefs is a YAML array of ids picked from the input pending_hooks / subplot_board
 - Every level-2 heading (##) must appear; none may be empty
 - Do NOT use methodology jargon ("emotional gap", "cyclePhase", "pressure buildup") in the memo — speak directly using this book's people, places, events
@@ -210,7 +210,6 @@ defer:
 export const PLANNER_MEMO_USER_TEMPLATE_EN = `# Chapter {{chapterNumber}} memo request
 
 {{brief_block}}
-{{chapter_context_block}}
 
 ## Last screen of previous chapter (excerpt)
 {{previous_chapter_ending_excerpt}}
@@ -259,7 +258,6 @@ export function getPlannerMemoUserTemplate(language: "zh" | "en" = "zh"): string
 export const PLANNER_MEMO_USER_TEMPLATE = `# 第 {{chapterNumber}} 章 memo 请求
 
 {{brief_block}}
-{{chapter_context_block}}
 
 ## 上一章最后一屏（原文节选）
 {{previous_chapter_ending_excerpt}}
@@ -305,7 +303,6 @@ export interface PlannerUserMessageInput {
   readonly isGoldenOpening: boolean;
   readonly bookRulesRelevant: string;
   readonly brief?: string;
-  readonly chapterContext?: string;
   readonly language?: "zh" | "en";
 }
 
@@ -316,12 +313,10 @@ export function buildPlannerUserMessage(input: PlannerUserMessageInput): string 
   const noText = language === "en" ? "no" : "否";
 
   const briefBlock = buildBriefBlock(input.brief ?? "", language);
-  const chapterContextBlock = buildChapterContextBlock(input.chapterContext ?? "", language);
 
   const filled = template
     .replaceAll("{{chapterNumber}}", String(input.chapterNumber))
     .replaceAll("{{brief_block}}", briefBlock)
-    .replaceAll("{{chapter_context_block}}", chapterContextBlock)
     .replaceAll("{{previous_chapter_ending_excerpt}}", input.previousChapterEndingExcerpt)
     .replaceAll("{{recent_summaries}}", input.recentSummaries)
     .replaceAll("{{current_arc_prose}}", input.currentArcProse)
@@ -357,21 +352,6 @@ The brief is the user's direct instruction. When planning this chapter, honor th
 ${trimmed}
 
 brief 是用户的直接指令。本章规划时，必须优先兑现 brief 里写明的核心设定（主角设定、世界前提、开场机制、样本章回钩子等）。**不要把 brief 里的核心设定推迟到后面的章节**——该在前几章落地的必须落地。`;
-}
-
-function buildChapterContextBlock(chapterContext: string, language: "zh" | "en"): string {
-  const trimmed = chapterContext.trim();
-  if (!trimmed) return "";
-  if (language === "en") {
-    return `## Per-chapter user instruction (highest priority for this chapter)
-${trimmed}
-
-This is the user's direct instruction for the current chapter. The memo must obey it before the outline fallback. If the user specifies a chapter title, preserve that title exactly in the memo so the writer can use it as CHAPTER_TITLE. If it conflicts with the volume outline, reconcile by keeping continuity but following this chapter instruction.`;
-  }
-  return `## 本章用户指令（本章最高优先级）
-${trimmed}
-
-这是用户对当前章节的直接指令。memo 必须优先遵守它，再参考卷纲兜底。如果用户指定了章节标题，必须在 memo 中原样保留该标题，供写手作为 CHAPTER_TITLE 使用。若它与卷纲不完全一致，保持连续性，但以本章用户指令为准。`;
 }
 
 // ---------------------------------------------------------------------------

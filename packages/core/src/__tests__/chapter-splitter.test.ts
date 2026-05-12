@@ -153,4 +153,175 @@ describe("splitChapters", () => {
     expect(chapters[0]?.content).toBe("The harbor bells rang once and went silent.");
     expect(chapters[0]?.content).not.toContain("Project Gutenberg");
   });
+
+  // ── New: bare chapter number headings ──
+
+  it("splits bare numeric chapter headings without 第 prefix", () => {
+    const input = [
+      "1188章巧合",
+      "",
+      "杨洛笑着说道。",
+      "",
+      "1189章屠狗",
+      "",
+      "郑达民低沉的喊了一声。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(2);
+    expect(chapters[0]?.title).toBe("巧合");
+    expect(chapters[0]?.content).toBe("杨洛笑着说道。");
+    expect(chapters[1]?.title).toBe("屠狗");
+    expect(chapters[1]?.content).toBe("郑达民低沉的喊了一声。");
+  });
+
+  it("splits bare numeric chapter headings with space after 章", () => {
+    const input = [
+      "001章引子",
+      "",
+      "这是开头。",
+      "",
+      "002章韩国美女",
+      "",
+      "韩国汉城。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(2);
+    expect(chapters[0]?.title).toBe("引子");
+    expect(chapters[1]?.title).toBe("韩国美女");
+  });
+
+  // ── New: noise cleaning ──
+
+  it("removes advertisement recommendation lines", () => {
+    const input = [
+      "第一章 测试",
+      "",
+      "推荐好文：《超级学生》作者：公子诺。《极品美女的贴身保镖》作者：飞哥带路。《风流官王》作者：万年九眼。",
+      "",
+      "正文内容在这里。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.content).not.toContain("推荐好文");
+    expect(chapters[0]?.content).not.toContain("超级学生");
+    expect(chapters[0]?.content).toContain("正文内容在这里。");
+  });
+
+  it("removes HTML entity-encoded links from prose", () => {
+    const input = [
+      "第一章 测试",
+      "",
+      "同志TXT下载&lt;a href=&quot; target=&quot;_blank&quot;&gt;首席御医&lt;/a&gt;！",
+      "",
+      "正文继续。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.content).not.toContain("TXT下载");
+    expect(chapters[0]?.content).not.toContain("&lt;a");
+    expect(chapters[0]?.content).toContain("正文继续。");
+  });
+
+  it("removes embedded watermark phrases from prose lines", () => {
+    const input = [
+      "第一章 测试",
+      "",
+      "杨洛启动车子来到工厂。寻找最快更新网站，请百度搜索+看书网",
+      "",
+      "红旗酒店已经封锁。寻找最快更新网站，请百度搜索+看书网",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.content).not.toContain("百度搜索");
+    expect(chapters[0]?.content).not.toContain("看书网");
+    expect(chapters[0]?.content).toContain("杨洛启动车子来到工厂。");
+    expect(chapters[0]?.content).toContain("红旗酒店已经封锁。");
+  });
+
+  it("removes separator lines and trailing > garbage", () => {
+    const input = [
+      "第一章 测试",
+      "",
+      "------------",
+      "",
+      "正文内容。",
+      "",
+      "&gt;，",
+      "",
+      "更多正文。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.content).not.toContain("----");
+    expect(chapters[0]?.content).not.toContain("&gt;");
+    expect(chapters[0]?.content).toContain("正文内容。");
+    expect(chapters[0]?.content).toContain("更多正文。");
+  });
+
+  it("removes piracy site boilerplate lines", () => {
+    const input = [
+      "第一章 测试",
+      "",
+      "无弹窗",
+      "",
+      "天才一秒钟记住本站",
+      "",
+      "正文内容。",
+      "",
+      "手机版阅读网址：m.xxx.com",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.content).not.toContain("无弹窗");
+    expect(chapters[0]?.content).not.toContain("天才一秒钟");
+    expect(chapters[0]?.content).not.toContain("手机版阅读");
+    expect(chapters[0]?.content).toContain("正文内容。");
+  });
+
+  it("cleans |三八文学 watermark from prose", () => {
+    const input = [
+      "第一章 测试",
+      "",
+      "杨洛没有理他消失在楼梯口。|三八文学",
+      "",
+      "来到房间，欧阳情焦急的说道。|三八文学",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.content).not.toContain("三八文学");
+    expect(chapters[0]?.content).toContain("杨洛没有理他消失在楼梯口。");
+    expect(chapters[0]?.content).toContain("来到房间，欧阳情焦急的说道。");
+  });
+
+  it("removes A ，最快更新 prefix from chapter openings", () => {
+    const input = [
+      "第一章 测试",
+      "",
+      "A ，最快更新特种兵在都市最新章节！",
+      "",
+      "杨洛拍拍肩膀。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.content).not.toContain("最快更新");
+    expect(chapters[0]?.content).toContain("杨洛拍拍肩膀。");
+  });
 });

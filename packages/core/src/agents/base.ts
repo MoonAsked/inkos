@@ -27,9 +27,15 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
+    const label = this.name;
+    const onStreamProgress = this.ctx.onStreamProgress
+      ? (progress: Omit<import("../llm/provider.js").StreamProgress, "label">) => {
+          this.ctx.onStreamProgress!({ ...progress, label });
+        }
+      : undefined;
     return chatCompletion(this.ctx.client, this.ctx.model, messages, {
       ...options,
-      onStreamProgress: this.ctx.onStreamProgress,
+      onStreamProgress,
     });
   }
 
@@ -42,12 +48,18 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
+    const label = this.name;
+    const labeledOnStreamProgress = this.ctx.onStreamProgress
+      ? (progress: Omit<import("../llm/provider.js").StreamProgress, "label">) => {
+          this.ctx.onStreamProgress!({ ...progress, label });
+        }
+      : undefined;
     // OpenAI has native search — use it directly
     if (this.ctx.client.provider === "openai") {
       return chatCompletion(this.ctx.client, this.ctx.model, messages, {
         ...options,
         webSearch: true,
-        onStreamProgress: this.ctx.onStreamProgress,
+        onStreamProgress: labeledOnStreamProgress,
       });
     }
 

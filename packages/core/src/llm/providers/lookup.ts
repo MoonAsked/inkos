@@ -7,7 +7,7 @@ import { getAllEndpoints, getEndpoint } from "./index.js";
  */
 const PROVIDER_PRIORITY: readonly string[] = [
   "anthropic", "openai", "google", "deepseek", "bailian", "moonshot", "kimicode",
-  "zhipu", "minimax", "xai",
+  "zhipu", "minimax", "xai", "nvidia",
   "siliconcloud", "ppio",
   "openrouter", "aihubmix", "novita",
 ];

@@ -47,6 +47,21 @@ export async function loadRuntimeStateSnapshot(bookDir: string): Promise<Runtime
 
   const issues = validateRuntimeState(snapshot);
   if (issues.length > 0) {
+    // Attempt auto-repair for recoverable issues (duplicate IDs that can be deduped)
+    const repaired = repairRuntimeState(snapshot, issues);
+    if (repaired) {
+      // Re-validate after repair; if still broken, throw
+      const remaining = validateRuntimeState(repaired);
+      if (remaining.length > 0) {
+        const summary = remaining
+          .map((issue) => `${issue.code}${issue.path ? `@${issue.path}` : ""}`)
+          .join(", ");
+        throw new Error(`Invalid persisted runtime state (after auto-repair): ${summary}`);
+      }
+      // Persist the repaired state so subsequent loads are clean
+      await saveRuntimeStateSnapshot(bookDir, repaired);
+      return repaired;
+    }
     const summary = issues
       .map((issue) => `${issue.code}${issue.path ? `@${issue.path}` : ""}`)
       .join(", ");
@@ -161,4 +176,67 @@ async function readJsonOrNull<T>(
   } catch {
     return null;
   }
+}
+
+/**
+ * Attempt to auto-repair recoverable runtime state issues.
+ * Currently handles:
+ * - duplicate_hook_id: keeps the last occurrence (most recent write wins)
+ * - duplicate_summary_chapter: keeps the last occurrence
+ *
+ * Returns the repaired snapshot, or undefined if the issues are not recoverable.
+ */
+function repairRuntimeState(
+  snapshot: RuntimeStateSnapshot,
+  issues: ReadonlyArray<{ readonly code: string; readonly message: string; readonly path?: string }>,
+): RuntimeStateSnapshot | undefined {
+  const recoverableCodes = new Set(["duplicate_hook_id", "duplicate_summary_chapter"]);
+  const hasUnrecoverable = issues.some((issue) => !recoverableCodes.has(issue.code));
+  if (hasUnrecoverable) return undefined;
+
+  let hooks = snapshot.hooks;
+  let chapterSummaries = snapshot.chapterSummaries;
+
+  // Deduplicate hooks: last occurrence wins (most recently written)
+  if (issues.some((issue) => issue.code === "duplicate_hook_id")) {
+    const seen = new Map<string, number>();
+    const deduped: typeof hooks.hooks = [];
+    // Iterate in order; later entries overwrite earlier ones with the same hookId
+    for (const hook of hooks.hooks) {
+      seen.set(hook.hookId, deduped.length);
+      deduped.push(hook);
+    }
+    // Now remove earlier duplicates: keep only the last entry per hookId
+    const finalHooks: typeof hooks.hooks = [];
+    const added = new Set<string>();
+    for (let i = deduped.length - 1; i >= 0; i--) {
+      const hook = deduped[i]!;
+      if (!added.has(hook.hookId)) {
+        added.add(hook.hookId);
+        finalHooks.unshift(hook);
+      }
+    }
+    hooks = { hooks: finalHooks };
+  }
+
+  // Deduplicate chapter summaries: last occurrence wins
+  if (issues.some((issue) => issue.code === "duplicate_summary_chapter")) {
+    const finalRows: typeof chapterSummaries.rows = [];
+    const added = new Set<number>();
+    for (let i = chapterSummaries.rows.length - 1; i >= 0; i--) {
+      const row = chapterSummaries.rows[i]!;
+      if (!added.has(row.chapter)) {
+        added.add(row.chapter);
+        finalRows.unshift(row);
+      }
+    }
+    chapterSummaries = { rows: finalRows };
+  }
+
+  return {
+    manifest: snapshot.manifest,
+    currentState: snapshot.currentState,
+    hooks,
+    chapterSummaries,
+  };
 }

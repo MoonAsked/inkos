@@ -644,8 +644,7 @@ describe("ArchitectAgent", () => {
     await agent.generateFoundationFromImport(book, "第一章正文");
 
     const options = chatSpy.mock.calls[0]?.[1] as { temperature?: number; maxTokens?: number } | undefined;
-    expect(options).toEqual(expect.objectContaining({ temperature: 0.5 }));
-    expect(options).not.toHaveProperty("maxTokens");
+    expect(options).toEqual(expect.objectContaining({ temperature: 0.5, maxTokens: 20480 }));
   });
 
   it("uses modelCard output budget when generating fanfic foundation", async () => {

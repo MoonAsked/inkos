@@ -65,6 +65,9 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       readVolumeMap(bookDir, placeholder),
     ]);
     const parsedBookRules = await readBookRules(bookDir);
+    if (parsedBookRules === null) {
+      this.log?.warn(`[chapter-analyzer] readBookRules returned null for ${bookDir} — proceeding without book rules (Phase 5 compat shim or missing frontmatter)`);
+    }
     const bookRulesBody = parsedBookRules?.body ?? "";
     const bookRules = parsedBookRules?.rules;
     const governedMode = Boolean(input.chapterIntent && input.contextPackage && input.ruleStack);
@@ -116,10 +119,85 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       resolvedLanguage,
     );
 
+    const bibleBlock = !governedMode && storyBible !== this.missingFilePlaceholder(resolvedLanguage)
+      ? resolvedLanguage === "en"
+        ? `\n## Story Bible\n${storyBible}\n`
+        : `\n## 世界观设定\n${storyBible}\n`
+      : "";
+    const outlineOrControlBlock = reducedControlBlock || (
+      volumeOutline !== this.missingFilePlaceholder(resolvedLanguage)
+        ? resolvedLanguage === "en"
+          ? `\n## Volume Outline\n${volumeOutline}\n`
+          : `\n## 卷纲\n${volumeOutline}\n`
+        : ""
+    );
+    const hooksBlock = governedMemoryBlocks?.hooksBlock
+      ?? (
+        hooksWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
+          ? resolvedLanguage === "en"
+            ? `\n## Current Hooks\n${hooksWorkingSet}\n`
+            : `\n## 当前伏笔池\n${hooksWorkingSet}\n`
+          : ""
+      );
+    const summariesBlock = governedMemoryBlocks?.summariesBlock
+      ?? (
+        chapterSummaries !== this.missingFilePlaceholder(resolvedLanguage)
+          ? resolvedLanguage === "en"
+            ? `\n## Existing Chapter Summaries\n${chapterSummaries}\n`
+            : `\n## 已有章节摘要\n${chapterSummaries}\n`
+          : ""
+      );
+    const volumeSummariesBlock = governedMemoryBlocks?.volumeSummariesBlock ?? "";
+    const subplotBlock = subplotWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
+      ? resolvedLanguage === "en"
+        ? `\n## Current Subplot Board\n${subplotWorkingSet}\n`
+        : `\n## 当前支线进度板\n${subplotWorkingSet}\n`
+      : "";
+    const emotionalBlock = emotionalWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
+      ? resolvedLanguage === "en"
+        ? `\n## Current Emotional Arcs\n${emotionalWorkingSet}\n`
+        : `\n## 当前情感弧线\n${emotionalWorkingSet}\n`
+      : "";
+    const matrixBlock = matrixWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
+      ? resolvedLanguage === "en"
+        ? `\n## Current Character Matrix\n${matrixWorkingSet}\n`
+        : `\n## 当前角色交互矩阵\n${matrixWorkingSet}\n`
+      : "";
+
+    // Truncate chapterContent if the total prompt would exceed the context window.
+    // CJK text: ~1.5 chars/token; use only 70% of context window for headroom.
+    const contextWindow = this.ctx.client._piModel?.contextWindow ?? 128_000;
+    const usableContext = Math.floor(contextWindow * 0.7);
+    const reservedForSystemAndOutput = Math.ceil(systemPrompt.length / 1.5) + 16384 + 4096;
+    const contextOverhead = currentState.length
+      + (genreProfile.numericalSystem ? ledger.length : 0)
+      + hooksBlock.length + summariesBlock.length + volumeSummariesBlock.length
+      + subplotBlock.length + emotionalBlock.length + matrixBlock.length
+      + bibleBlock.length + outlineOrControlBlock.length
+      + 200; // structural overhead (headings, labels, etc.)
+    const maxChapterChars = Math.floor((usableContext - reservedForSystemAndOutput) * 1.5) - contextOverhead;
+    let safeChapterContent = chapterContent;
+    let chapterTruncated = false;
+    if (maxChapterChars > 0 && chapterContent.length > maxChapterChars) {
+      chapterTruncated = true;
+      const headLen = Math.floor(maxChapterChars * 0.7);
+      const tailLen = Math.floor(maxChapterChars * 0.25);
+      const skipNotice = resolvedLanguage === "en"
+        ? "\n\n--- [MIDDLE SECTION OMITTED — chapter too long for context window] ---\n\n"
+        : "\n\n--- [中间部分已省略——章节过长，超出上下文窗口] ---\n\n";
+      safeChapterContent = chapterContent.slice(0, headLen) + skipNotice + chapterContent.slice(chapterContent.length - tailLen);
+      this.log?.warn(`[chapter-analyzer] Truncated chapter ${chapterNumber} content: ${chapterContent.length} → ${safeChapterContent.length} chars (contextWindow=${contextWindow}, maxChapterChars=${maxChapterChars})`);
+    }
+    const truncationNote = chapterTruncated
+      ? (resolvedLanguage === "en"
+          ? "\n\nNote: This chapter's text was too long for the context window and has been truncated. The opening and ending sections are preserved; analyze based on the available text."
+          : "\n\n注意：本章正文过长，已截断以适应上下文窗口。保留了开头和结尾部分，请根据可用文本进行分析。")
+      : "";
+
     const userPrompt = this.buildUserPrompt({
       language: resolvedLanguage,
       chapterNumber,
-      chapterContent,
+      chapterContent: safeChapterContent,
       chapterTitle,
       currentState,
       ledger: genreProfile.numericalSystem ? ledger : "",
@@ -128,51 +206,15 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       subplotBoard: subplotWorkingSet,
       emotionalArcs: emotionalWorkingSet,
       characterMatrix: matrixWorkingSet,
-      bibleBlock: !governedMode && storyBible !== this.missingFilePlaceholder(resolvedLanguage)
-        ? resolvedLanguage === "en"
-          ? `\n## Story Bible\n${storyBible}\n`
-          : `\n## 世界观设定\n${storyBible}\n`
-        : "",
-      outlineOrControlBlock: reducedControlBlock || (
-        volumeOutline !== this.missingFilePlaceholder(resolvedLanguage)
-          ? resolvedLanguage === "en"
-            ? `\n## Volume Outline\n${volumeOutline}\n`
-            : `\n## 卷纲\n${volumeOutline}\n`
-          : ""
-      ),
-      hooksBlock: governedMemoryBlocks?.hooksBlock
-        ?? (
-          hooksWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
-            ? resolvedLanguage === "en"
-              ? `\n## Current Hooks\n${hooksWorkingSet}\n`
-              : `\n## 当前伏笔池\n${hooksWorkingSet}\n`
-            : ""
-        ),
-      summariesBlock: governedMemoryBlocks?.summariesBlock
-        ?? (
-          chapterSummaries !== this.missingFilePlaceholder(resolvedLanguage)
-            ? resolvedLanguage === "en"
-              ? `\n## Existing Chapter Summaries\n${chapterSummaries}\n`
-              : `\n## 已有章节摘要\n${chapterSummaries}\n`
-            : ""
-        ),
-      volumeSummariesBlock: governedMemoryBlocks?.volumeSummariesBlock ?? "",
-      subplotBlock: subplotWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
-        ? resolvedLanguage === "en"
-          ? `\n## Current Subplot Board\n${subplotWorkingSet}\n`
-          : `\n## 当前支线进度板\n${subplotWorkingSet}\n`
-        : "",
-      emotionalBlock: emotionalWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
-        ? resolvedLanguage === "en"
-          ? `\n## Current Emotional Arcs\n${emotionalWorkingSet}\n`
-          : `\n## 当前情感弧线\n${emotionalWorkingSet}\n`
-        : "",
-      matrixBlock: matrixWorkingSet !== this.missingFilePlaceholder(resolvedLanguage)
-        ? resolvedLanguage === "en"
-          ? `\n## Current Character Matrix\n${matrixWorkingSet}\n`
-          : `\n## 当前角色交互矩阵\n${matrixWorkingSet}\n`
-        : "",
-    });
+      bibleBlock,
+      outlineOrControlBlock,
+      hooksBlock,
+      summariesBlock,
+      volumeSummariesBlock,
+      subplotBlock,
+      emotionalBlock,
+      matrixBlock,
+    }) + truncationNote;
 
     const response = await this.chat(
       [

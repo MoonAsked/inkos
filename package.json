@@ -1,6 +1,6 @@
 {
   "name": "inkos",
-  "version": "1.3.8",
+  "version": "1.3.7",
   "private": true,
   "description": "Autonomous AI novel writing CLI agent — 10-agent pipeline that writes, audits, and revises novels with continuity tracking",
   "keywords": [
@@ -37,6 +37,11 @@
     "overrides": {
       "@mariozechner/pi-ai": "0.67.1",
       "@mariozechner/pi-agent-core": "0.67.1"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "msw",
+      "protobufjs"
+    ]
   }
 }

@@ -1471,7 +1471,7 @@ export class PipelineRunner {
   async writeNextChapter(bookId: string, wordCount?: number, temperatureOverride?: number): Promise<ChapterPipelineResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
-      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, this.config.externalContext);
+      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride);
     } finally {
       await releaseLock();
     }
@@ -1495,12 +1495,7 @@ export class PipelineRunner {
     }
   }
 
-  private async _writeNextChapterLocked(
-    bookId: string,
-    wordCount?: number,
-    temperatureOverride?: number,
-    externalContext?: string,
-  ): Promise<ChapterPipelineResult> {
+  private async _writeNextChapterLocked(bookId: string, wordCount?: number, temperatureOverride?: number): Promise<ChapterPipelineResult> {
     await this.state.ensureControlDocuments(bookId);
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
@@ -1512,7 +1507,7 @@ export class PipelineRunner {
       book,
       bookDir,
       chapterNumber,
-      externalContext,
+      this.config.externalContext,
     );
     const reducedControlInput = writeInput.chapterIntent && writeInput.contextPackage && writeInput.ruleStack
       ? {
@@ -2512,24 +2507,81 @@ ${matrix}`,
       const log = this.config.logger?.child("import");
 
       // Step 1: Generate foundation on first run (not on resume)
-      if (startFrom === 1) {
+      // Skip if foundation already exists (e.g. previous import was interrupted after step 1)
+      const foundationAlreadyExists = startFrom === 1 && await this.state.isCompleteBookDirectory(bookDir);
+      if (startFrom === 1 && !foundationAlreadyExists) {
         log?.info(this.localize(resolvedLanguage, {
           zh: `步骤 1：从 ${input.chapters.length} 章生成基础设定...`,
           en: `Step 1: Generating foundation from ${input.chapters.length} chapters...`,
         }));
         const foundationSource = buildImportFoundationSource(input.chapters, resolvedLanguage);
 
+        // Sample chapters if the combined text is too long for the context window.
+        // The architect will further truncate at char level, but sampling whole chapters
+        // preserves narrative coherence better than mid-chapter cuts.
+        const contextWindow = this.agentCtxFor("architect", input.bookId).client._piModel?.contextWindow ?? 128_000;
+        const usableTokens = Math.floor(contextWindow * 0.7);
+        // Rough estimate: 1 CJK char ≈ 1.5 tokens, 1 ASCII char ≈ 0.25 tokens
+        const estimateTokens = (s: string) => {
+          let tokens = 0;
+          for (const ch of s) tokens += ch.charCodeAt(0) > 0x7f ? 1.5 : 0.25;
+          return tokens;
+        };
+        let sampledText = foundationSource;
+        const allTextTokens = estimateTokens(foundationSource);
+        if (allTextTokens > usableTokens) {
+          // Build chapter chunks with token estimates
+          const chapterChunks = input.chapters.map((c, i) => {
+            const text = resolvedLanguage === "en"
+              ? `Chapter ${i + 1}: ${c.title}\n\n${c.content}`
+              : `第${i + 1}章 ${c.title}\n\n${c.content}`;
+            return { text, tokens: estimateTokens(text) };
+          });
+          // Always include first 5 and last 5 chapters; sample evenly from the middle
+          const headCount = Math.min(5, chapterChunks.length);
+          const tailCount = Math.min(5, chapterChunks.length - headCount);
+          const headChapters = chapterChunks.slice(0, headCount);
+          const tailChapters = chapterChunks.slice(chapterChunks.length - tailCount);
+          let budget = usableTokens - 16384 - 4096; // reserve for system prompt + output
+          let selected: typeof chapterChunks = [];
+          for (const ch of headChapters) {
+            if (budget > ch.tokens) { selected.push(ch); budget -= ch.tokens; }
+          }
+          for (const ch of tailChapters) {
+            if (budget > ch.tokens) { selected.push(ch); budget -= ch.tokens; }
+          }
+          // Fill remaining budget with evenly-spaced middle chapters
+          const middleStart = headCount;
+          const middleEnd = chapterChunks.length - tailCount;
+          const middleChapters = chapterChunks.slice(middleStart, middleEnd);
+          if (middleChapters.length > 0 && budget > 0) {
+            const step = Math.max(1, Math.floor(middleChapters.length / Math.ceil(budget / (usableTokens / 10))));
+            for (let i = 0; i < middleChapters.length && budget > 0; i += step) {
+              const ch = middleChapters[i]!;
+              if (budget > ch.tokens) { selected.push(ch); budget -= ch.tokens; }
+            }
+          }
+          // Sort by original order
+          selected.sort((a, b) => chapterChunks.indexOf(a) - chapterChunks.indexOf(b));
+          const skipNotice = resolvedLanguage === "en"
+            ? "\n\n--- [Some chapters omitted — text too long for context window] ---\n\n"
+            : "\n\n--- [部分章节已省略——文本超出上下文窗口] ---\n\n";
+          sampledText = selected.map((c) => c.text).join("\n\n---\n\n") + skipNotice;
+          log?.info(this.localize(resolvedLanguage, {
+            zh: `章节采样：${input.chapters.length} 章 → ${selected.length} 章（${Math.round(allTextTokens)} → ${Math.round(estimateTokens(sampledText))} tokens）`,
+            en: `Chapter sampling: ${input.chapters.length} → ${selected.length} chapters (${Math.round(allTextTokens)} → ${Math.round(estimateTokens(sampledText))} tokens)`,
+          }));
+        }
+
         const architect = new ArchitectAgent(this.agentCtxFor("architect", input.bookId));
         const isSeries = input.importMode === "series";
-        const foundation = isSeries
-          ? await this.generateAndReviewFoundation({
-              generate: (reviewFeedback) => architect.generateFoundationFromImport(book, foundationSource, undefined, reviewFeedback, { importMode: "series" }),
-              reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
-              mode: "series",
-              language: resolvedLanguage === "en" ? "en" : "zh",
-              stageLanguage: resolvedLanguage,
-            })
-          : await architect.generateFoundationFromImport(book, foundationSource);
+        const foundation = await this.generateAndReviewFoundation({
+          generate: (reviewFeedback) => architect.generateFoundationFromImport(book, foundationSource, undefined, reviewFeedback, { importMode: isSeries ? "series" : undefined }),
+          reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
+          mode: isSeries ? "series" : "original",
+          language: resolvedLanguage === "en" ? "en" : "zh",
+          stageLanguage: resolvedLanguage,
+        });
         await architect.writeFoundationFiles(
           bookDir,
           foundation,
@@ -2555,6 +2607,13 @@ ${matrix}`,
         }));
       }
 
+      if (foundationAlreadyExists) {
+        log?.info(this.localize(resolvedLanguage, {
+          zh: "步骤 1 已跳过：基础设定已存在，直接进入章节回放。",
+          en: "Step 1 skipped: foundation already exists, proceeding to chapter replay.",
+        }));
+      }
+
       // Step 2: Sequential replay
       log?.info(this.localize(resolvedLanguage, {
         zh: `步骤 2：从第 ${startFrom} 章开始顺序回放...`,
@@ -2576,17 +2635,49 @@ ${matrix}`,
           en: `Analyzing chapter ${chapterNumber}/${input.chapters.length}: ${ch.title}...`,
         }));
 
-        // Analyze chapter to get truth file updates
-        const output = await analyzer.analyzeChapter({
-          book,
-          bookDir,
-          chapterNumber,
-          chapterContent: ch.content,
-          chapterTitle: ch.title,
-          chapterIntent: governedInput.chapterIntent,
-          contextPackage: governedInput.contextPackage,
-          ruleStack: governedInput.ruleStack,
-        });
+        // Analyze chapter to get truth file updates (with retry for empty LLM responses)
+        let output: any;
+        const maxAnalyzeRetries = 5;
+        for (let analyzeAttempt = 0; analyzeAttempt <= maxAnalyzeRetries; analyzeAttempt++) {
+          try {
+            output = await analyzer.analyzeChapter({
+              book,
+              bookDir,
+              chapterNumber,
+              chapterContent: ch.content,
+              chapterTitle: ch.title,
+              chapterIntent: governedInput.chapterIntent,
+              contextPackage: governedInput.contextPackage,
+              ruleStack: governedInput.ruleStack,
+            });
+            break;
+          } catch (analyzeError: any) {
+            const errMsg = analyzeError?.message ?? "";
+            const isEmptyResponse = errMsg.includes("empty response");
+            const isTerminated = errMsg.includes("terminated");
+            const isRateLimited = errMsg.includes("429") || errMsg.includes("rate limit");
+            if ((isEmptyResponse || isTerminated || isRateLimited) && analyzeAttempt < maxAnalyzeRetries) {
+              const reason = isRateLimited ? "请求过多(429)" : isTerminated ? "连接被终止" : "返回空响应";
+              const reasonEn = isRateLimited ? "rate limited (429)" : isTerminated ? "connection terminated" : "returned empty response";
+              if (isRateLimited) {
+                // Exponential backoff for rate limits: 5s, 10s, 20s, 40s, 80s
+                const delayMs = 5_000 * Math.pow(2, analyzeAttempt);
+                log?.warn(this.localize(resolvedLanguage, {
+                  zh: `章节 ${chapterNumber} 分析${reason}（第${analyzeAttempt + 1}次），等待 ${Math.round(delayMs / 1000)}s 后重试...`,
+                  en: `Chapter ${chapterNumber} analysis ${reasonEn} (attempt ${analyzeAttempt + 1}), waiting ${Math.round(delayMs / 1000)}s before retry...`,
+                }));
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+              } else {
+                log?.warn(this.localize(resolvedLanguage, {
+                  zh: `章节 ${chapterNumber} 分析${reason}（第${analyzeAttempt + 1}次），重试中...`,
+                  en: `Chapter ${chapterNumber} analysis ${reasonEn} (attempt ${analyzeAttempt + 1}), retrying...`,
+                }));
+              }
+              continue;
+            }
+            throw analyzeError;
+          }
+        }
 
         // Save chapter file + core truth files (state, ledger, hooks)
         await writer.saveChapter(bookDir, {
@@ -2742,7 +2833,6 @@ ${matrix}`,
     );
 
     return {
-      externalContext,
       chapterIntent: plan.intentMarkdown,
       chapterMemo: plan.memo,
       chapterIntentData: plan.intent,
@@ -3348,7 +3438,7 @@ ${matrix}`,
     const revisionBlockingIssues: ReadonlyArray<AuditIssue> = [
       ...llmAudit.issues,
       ...aiTells.issues,
-      ...sensitiveResult.issues,
+      ...sensitiveResult.issues.filter((i) => i.severity === "critical"),
     ];
 
     return {

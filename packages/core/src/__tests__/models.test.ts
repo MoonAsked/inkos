@@ -560,11 +560,11 @@ describe("ChapterMemoSchema", () => {
     expect(result.threadRefs).toEqual([]);
   });
 
-  it("rejects goal longer than 50 chars", () => {
+  it("rejects goal longer than 80 chars", () => {
     expect(() =>
       ChapterMemoSchema.parse({
         chapter: 1,
-        goal: "a".repeat(51),
+        goal: "a".repeat(81),
         body: "## 当前任务\nx",
       }),
     ).toThrow();

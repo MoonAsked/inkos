@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const AGENT_FILES = [
-  "../agents/architect.ts",
+  // architect.ts is excluded — generateFoundationFromImport needs explicit maxTokens
+  // for large structured output (5 SECTION blocks) that exceeds typical modelCard defaults.
   "../agents/length-normalizer.ts",
   "../agents/planner.ts",
   "../agents/polisher.ts",

@@ -105,9 +105,9 @@ describe("providers structural integrity", () => {
     expect(ids).not.toContain("higress");
   });
 
-  it("B4：海外/本地/自定义/聚合/GH 全部收录（7 个）", () => {
+  it("B4：海外/本地/自定义/聚合/GH 全部收录（8 个）", () => {
     const ids = getAllEndpoints().map((p) => p.id);
-    for (const id of ["ollama", "openrouter", "custom", "mistral", "xai", "newapi", "githubCopilot"]) {
+    for (const id of ["ollama", "openrouter", "custom", "mistral", "xai", "nvidia", "newapi", "githubCopilot"]) {
       expect(ids).toContain(id);
     }
   });
@@ -117,9 +117,9 @@ describe("providers structural integrity", () => {
     expect(getEndpoint("newapi")?.baseUrl).toBe("");
   });
 
-  it("B4：总 provider 数 = 34（不含 CodingPlan 分组，R5 删 qwen / higress 后）", () => {
+  it("B4：总 provider 数 = 35（不含 CodingPlan 分组，R5 删 qwen / higress 后 + nvidia）", () => {
     const nonCoding = getAllEndpoints().filter((p) => p.group !== "codingPlan");
-    expect(nonCoding.length).toBe(34);
+    expect(nonCoding.length).toBe(35);
   });
 
   it("B6：CodingPlan 8 个 provider 全部收录", () => {
@@ -133,8 +133,8 @@ describe("providers structural integrity", () => {
     }
   });
 
-  it("B6：总 provider 数 = 42 (34 base + 8 CodingPlan)", () => {
-    expect(getAllEndpoints().length).toBe(42);
+  it("B6：总 provider 数 = 43 (35 base + 8 CodingPlan)", () => {
+    expect(getAllEndpoints().length).toBe(43);
   });
 
   it("B6：CodingPlan provider 都走 anthropic-messages", () => {
