@@ -16,6 +16,11 @@ export const OLLAMA: InkosEndpoint = {
   api: "openai-completions",
   baseUrl: "http://localhost:11434/v1",
   checkModel: "llama3.2:3b",
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "deepseek-v3.1:671b", maxOutput: 4096, contextWindowTokens: 163840 },
     { id: "gpt-oss:20b", maxOutput: 4096, contextWindowTokens: 131072, releasedAt: "2025-08-05" },

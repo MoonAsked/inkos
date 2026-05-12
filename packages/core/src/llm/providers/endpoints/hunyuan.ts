@@ -17,6 +17,11 @@ export const HUNYUAN: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 1,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "hunyuan-2.0-thinking-20251109", maxOutput: 64000, contextWindowTokens: 128000, enabled: true, releasedAt: "2025-11-09" },
     { id: "hunyuan-2.0-instruct-20251111", maxOutput: 16000, contextWindowTokens: 128000, enabled: true, releasedAt: "2025-11-11" },

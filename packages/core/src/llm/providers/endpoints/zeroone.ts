@@ -17,6 +17,11 @@ export const ZEROONE: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.3,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "yi-lightning", maxOutput: 4096, contextWindowTokens: 16384, enabled: true },
     { id: "yi-vision-v2", maxOutput: 4096, contextWindowTokens: 16384, enabled: true },

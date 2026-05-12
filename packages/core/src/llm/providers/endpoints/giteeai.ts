@@ -17,6 +17,11 @@ export const GITEEAI: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "DeepSeek-R1-Distill-Qwen-1.5B", maxOutput: 4096, contextWindowTokens: 32000, enabled: true },
     { id: "DeepSeek-R1-Distill-Qwen-7B", maxOutput: 4096, contextWindowTokens: 32000, enabled: true },

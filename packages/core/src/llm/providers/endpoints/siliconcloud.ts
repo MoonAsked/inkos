@@ -21,6 +21,11 @@ export const SILICONCLOUD: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     // --- 2026-04 新上 ---
     { id: "Pro/moonshotai/Kimi-K2.6", maxOutput: 4096, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-04-21", temperature: 1 },

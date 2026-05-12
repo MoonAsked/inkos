@@ -57,6 +57,10 @@ export interface ProviderCompat {
   readonly supportsDeveloperRole?: boolean;
   /** Some OpenAI-compatible providers reject restored histories ending in toolResult; only those providers get a synthetic assistant bridge during context projection. */
   readonly requiresAssistantAfterToolResult?: boolean;
+  /** Which field name to use for max tokens: "max_tokens" (legacy) or "max_completion_tokens" (OpenAI v2+). */
+  readonly maxTokensField?: "max_tokens" | "max_completion_tokens";
+  /** Whether the provider supports stream_options.include_usage in streaming requests. */
+  readonly supportsUsageInStreaming?: boolean;
 }
 
 export interface ProviderTransportDefaults {

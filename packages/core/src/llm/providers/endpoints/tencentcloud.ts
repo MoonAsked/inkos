@@ -17,6 +17,11 @@ export const TENCENTCLOUD: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "deepseek-r1", maxOutput: 16000, contextWindowTokens: 65536, enabled: true },
     { id: "deepseek-v3-0324", maxOutput: 16000, contextWindowTokens: 65536, enabled: true },
