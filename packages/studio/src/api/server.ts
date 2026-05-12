@@ -661,14 +661,22 @@ async function probeServiceCapabilities(args: {
     };
   }
   const discoveredModels = modelsResponse.models;
-  // For bank services, probe with the service's own check model first — not the global default.
   const endpoint = getAllEndpoints().find((ep) => ep.id === baseService);
   const preset = resolveServicePreset(baseService);
+  const discoveredFirstModel =
+    discoveredModels.find((model) => isTextChatModelId(model.id))?.id
+    ?? discoveredModels[0]?.id;
+  // Prefer live /models results; if unavailable, probe with the service's own check model before global defaults.
   const serviceFirstModel =
-    endpoint?.checkModel
+    discoveredFirstModel
+    ?? endpoint?.checkModel
     ?? preset?.knownModels?.[0]
     ?? endpoint?.models.find((model) => model.enabled !== false)?.id;
-  const useEndpointCheckModel = !isCustomServiceId(args.service) && Boolean(endpoint?.checkModel);
+const useDynamicLocalModels = baseService === "ollama";
+  const useEndpointCheckModel = !useDynamicLocalModels
+    && !isCustomServiceId(args.service)
+    && discoveredModels.length === 0
+    && Boolean(endpoint?.checkModel);
   const configService = typeof llm.service === "string" ? llm.service : undefined;
   const configModel = !useEndpointCheckModel && configService === args.service
     ? typeof llm.defaultModel === "string"
@@ -767,6 +775,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (error instanceof ApiError) {
       return c.json({ error: { code: error.code, message: error.message } }, error.status as 400);
     }
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("LLM API key not set") || message.includes("INKOS_LLM_API_KEY not set")) {
+      return c.json({ error: { code: "LLM_CONFIG_ERROR", message } }, 400);
+    }
+    console.error("[studio] Unexpected server error", error);
     return c.json(
       { error: { code: "INTERNAL_ERROR", message: "Unexpected server error." } },
       500,
@@ -905,6 +918,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       platform?: string;
       chapterWordCount?: number;
       targetChapters?: number;
+      blurb?: string;
     }>();
 
     const now = new Date().toISOString();
@@ -935,6 +949,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         platform: body.platform,
         chapterWordCount: body.chapterWordCount,
         targetChapters: body.targetChapters,
+        blurb: body.blurb,
       },
       tools,
     }).then(
