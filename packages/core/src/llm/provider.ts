@@ -12,13 +12,13 @@ import type {
   AssistantMessageEvent,
   Tool as PiTool,
   TextContent as PiTextContent,
+  ThinkingContent as PiThinkingContent,
   ToolCall as PiToolCall,
 } from "@mariozechner/pi-ai";
 import { resolveServicePreset } from "./service-presets.js";
 import { getEndpoint } from "./providers/index.js";
 import { lookupModel } from "./providers/lookup.js";
 import { fetchWithProxy } from "../utils/proxy-fetch.js";
-import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
 
 
 // === Streaming Monitor Types ===
@@ -27,7 +27,9 @@ export interface StreamProgress {
   readonly elapsedMs: number;
   readonly totalChars: number;
   readonly chineseChars: number;
+  readonly thinkingChars: number;
   readonly status: "streaming" | "done";
+  readonly label?: string;
 }
 
 export type OnStreamProgress = (progress: StreamProgress) => void;
@@ -35,6 +37,8 @@ export type OnStreamProgress = (progress: StreamProgress) => void;
 const INKOS_USER_AGENT = "InkOS/1.3.5";
 const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
 const TRANSIENT_LLM_RETRIES = 2;
+const RATE_LIMIT_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 5_000;
 
 function mergeUserAgent(headers?: Record<string, string>): Record<string, string> {
   return { "User-Agent": INKOS_USER_AGENT, ...(headers ?? {}) };
@@ -43,9 +47,10 @@ function mergeUserAgent(headers?: Record<string, string>): Record<string, string
 export function createStreamMonitor(
   onProgress?: OnStreamProgress,
   intervalMs: number = 30000,
-): { readonly onChunk: (text: string) => void; readonly stop: () => void } {
+): { readonly onChunk: (text: string) => void; readonly onThinkingChunk: (text: string) => void; readonly stop: () => void } {
   let totalChars = 0;
   let chineseChars = 0;
+  let thinkingChars = 0;
   const startTime = Date.now();
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -55,6 +60,7 @@ export function createStreamMonitor(
         elapsedMs: Date.now() - startTime,
         totalChars,
         chineseChars,
+        thinkingChars,
         status: "streaming",
       });
     }, intervalMs);
@@ -65,6 +71,9 @@ export function createStreamMonitor(
       totalChars += text.length;
       chineseChars += (text.match(/[\u4e00-\u9fff]/g) || []).length;
     },
+    onThinkingChunk(text: string): void {
+      thinkingChars += text.length;
+    },
     stop(): void {
       if (timer !== undefined) {
         clearInterval(timer);
@@ -74,6 +83,7 @@ export function createStreamMonitor(
         elapsedMs: Date.now() - startTime,
         totalChars,
         chineseChars,
+        thinkingChars,
         status: "done",
       });
     },
@@ -184,7 +194,6 @@ export function createLLMClient(config: LLMConfig): LLMClient {
   else if (inkosProvider?.id === "zhipu") piProvider = "zai";
   else if (inkosProvider?.id === "openrouter") piProvider = "openrouter";
   else if (inkosProvider?.id === "githubCopilot") piProvider = "githubCopilot";
-  else if (inkosProvider?.id === "ollama") piProvider = "ollama";
   else if (inkosProvider?.api === "anthropic-messages") piProvider = "anthropic";
   else piProvider = provider;
 
@@ -201,7 +210,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     reasoning: (config.thinkingBudget ?? 0) > 0,
     input: ["text"] as ("text" | "image")[],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: modelCard?.contextWindowTokens ?? 128_000,
+    contextWindow: config.contextWindow ?? modelCard?.contextWindowTokens ?? 128_000,
     maxTokens: modelCard?.maxOutput ?? UNKNOWN_MODEL_FALLBACK_MAX_TOKENS,
     ...(extraHeaders ? { headers: extraHeaders } : {}),
     ...(compat ? { compat } : {}),
@@ -388,6 +397,15 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
       `  建议：检查 INKOS_LLM_BASE_URL 是否包含完整路径（如 /v1）`,
     );
   }
+  if (msg.includes("terminated")) {
+    return new Error(
+      `LLM 流式连接被终止（terminated）。可能原因：\n` +
+      `  1. API 服务端超时断开连接（免费模型常有 60-120s 无输出超时）\n` +
+      `  2. 模型推理过程中 OOM 或服务端异常\n` +
+      `  3. 请求文本超出模型上下文窗口\n` +
+      `  建议：换用付费模型或更快的模型，减少单次输入长度，或稍后重试${ctxLine}`,
+    );
+  }
   // R4 Bug 2: 5xx "status code (no body)" — 尝试从 OpenAI SDK APIError 里抽 body 给用户看具体原因
   // （如 PPIO 的 {"code":500,"reason":"MODEL_NOT_AVAILABLE","message":"model not available"}）
   if (msg.includes("status code") && msg.includes("no body")) {
@@ -443,6 +461,11 @@ function isTransientLLMTransportError(error: unknown): boolean {
   ].some((needle) => text.includes(needle));
 }
 
+function isRateLimitError(error: unknown): boolean {
+  const text = collectErrorText(error);
+  return text.includes("429") || text.includes("rate_limit") || text.includes("rate limit");
+}
+
 async function withTransientLLMRetry<T>(
   run: () => Promise<T>,
   options?: { readonly enabled?: boolean },
@@ -467,27 +490,36 @@ async function withTransientLLMRetry<T>(
   throw lastError;
 }
 
-function shouldUseNativeCustomTransport(client: LLMClient): boolean {
-  if (client.service === "custom") {
-    if (
-      client.configSource === "studio"
-      && (client.provider === "openai" || client.provider === "anthropic")
-    ) {
-      return true;
+async function withRateLimitRetry<T>(
+  run: () => Promise<T>,
+  onRetry?: (attempt: number, delayMs: number) => void,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt >= RATE_LIMIT_RETRIES
+        || error instanceof PartialResponseError
+        || !isRateLimitError(error)
+      ) {
+        throw error;
+      }
+      // Exponential backoff: 5s, 10s, 20s
+      const delayMs = RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, attempt);
+      onRetry?.(attempt + 1, delayMs);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    return client.provider === "openai" && shouldUseNativeLocalOpenAICompatibleTransport(client);
   }
-  return client.service === "ollama"
-    && client.provider === "openai"
-    && shouldUseNativeLocalOpenAICompatibleTransport(client);
+  throw lastError;
 }
 
-function shouldUseNativeLocalOpenAICompatibleTransport(client: LLMClient): boolean {
-  return !client._apiKey
-    && isApiKeyOptionalForEndpoint({
-      provider: client.provider,
-      baseUrl: client._piModel?.baseUrl,
-    });
+function shouldUseNativeCustomTransport(client: LLMClient): boolean {
+  return client.configSource === "studio"
+    && client.service === "custom"
+    && (client.provider === "openai" || client.provider === "anthropic");
 }
 
 function buildCustomHeaders(client: LLMClient): Record<string, string> {
@@ -621,9 +653,297 @@ function extractOpenAITextPart(value: any): string {
   return "";
 }
 
+/**
+ * Strip artifacts that thinking models commonly introduce in their output:
+ * 1. Code block wrapping: the body after ---...--- may be wrapped in ```...```
+ * 2. Italicized headings: *## heading* → ## heading
+ * These artifacts break downstream parsers like parseMemo() which expect
+ * plain markdown with standard ## headings.
+ */
+function stripThinkingModelArtifacts(text: string): string {
+  // Split into frontmatter (---...---) and body
+  const fmMatch = text.match(/^(---\s*\n[\s\S]*?\n---\s*\n)([\s\S]*)$/);
+  if (!fmMatch) return text;
+
+  let body = fmMatch[2]!;
+
+  // 1. Strip code block wrapping: if the body starts with ``` and ends with ```
+  //    (possibly with leading/trailing whitespace), remove the fences.
+  const codeBlockMatch = body.match(/^\s*```\s*(?:markdown|md)?\s*\n([\s\S]*?)\n\s*```\s*$/);
+  if (codeBlockMatch) {
+    body = codeBlockMatch[1]!;
+  }
+
+  // 2. Strip italic/bold markers around ## headings:
+  //    *## heading* → ## heading
+  //    **## heading** → ## heading
+  //    ***## heading*** → ## heading
+  body = body.replace(/^(\s*)\*{1,3}(## .+?)\*{1,3}/gm, "$1$2");
+
+  return fmMatch[1]! + body;
+}
+
+/**
+ * Extract the final answer from a thinking model's reasoning_content.
+ * Thinking models put their chain-of-thought in reasoning_content, but the
+ * actual structured output (YAML frontmatter, markdown, etc.) is usually
+ * at the end, after the reasoning. We try to extract just the answer part.
+ *
+ * Strategies (in order):
+ * 1. If the text contains YAML frontmatter (---...---), extract from the first --- to end
+ * 2. If the text contains a code block with yaml/yml/json, extract that block
+ * 3. If the text has a clear "answer" or "output" section marker, extract from there
+ * 4. If the text ends with structured content (YAML-like key: value lines), extract that tail
+ * 5. Otherwise, return the full text (better than empty — downstream parsers will
+ *    give a specific error about format, which is more actionable than "empty response")
+ */
+function extractAnswerFromReasoning(text: string): string {
+  // Strategy 1: YAML frontmatter
+  // Find the LAST ---...--- block (thinking models put the final answer at the end)
+  // and strip common indentation.
+  // IMPORTANT: also include everything AFTER the closing --- (the markdown body),
+  // because downstream parsers like parseMemo() expect `---\nYAML\n---\nBODY`.
+  //
+  // We search from the end because reasoning_content typically looks like:
+  //   [long thinking process, may contain --- as horizontal rules]
+  //   ---
+  //   chapter: 1
+  //   goal: ...
+  //   ---
+  //   ## 当前任务
+  //   ...
+  // The LAST ---...--- pair is the actual answer, not part of the reasoning.
+  const allYamlDelimiters: number[] = [];
+  let searchPos = 0;
+  while (searchPos < text.length) {
+    const pos = text.indexOf("---", searchPos);
+    if (pos < 0) break;
+    // Count --- that is at the start of a line, possibly with leading whitespace
+    // (e.g., "    ---" in indented frontmatter from thinking models), or at the
+    // very beginning of the text. We accept both "---" and "    ---" etc.
+    if (pos === 0 || text[pos - 1] === "\n" || (pos > 0 && text[pos - 1] === " " && (pos < 2 || text[pos - 2] === "\n" || text[pos - 2] === " "))) {
+      // Verify it's truly a line-start --- (only whitespace before it on this line)
+      let lineStart = pos;
+      while (lineStart > 0 && text[lineStart - 1] !== "\n") lineStart--;
+      const prefix = text.slice(lineStart, pos);
+      if (/^\s*$/.test(prefix)) {
+        allYamlDelimiters.push(pos);
+      }
+    }
+    searchPos = pos + 3;
+  }
+  // Try delimiter pairs from the end, looking for a valid ---\n...\n--- pattern
+  for (let i = allYamlDelimiters.length - 1; i >= 1; i--) {
+    const closingPos = allYamlDelimiters[i]!;
+    const openingPos = allYamlDelimiters[i - 1]!;
+    // The opening --- must be before the closing ---, and there must be content between them
+    if (openingPos >= closingPos) continue;
+    const betweenStart = openingPos + 3;
+    // Skip whitespace after opening ---
+    const afterOpening = text.indexOf("\n", betweenStart);
+    if (afterOpening < 0 || afterOpening >= closingPos) continue;
+    // Check that closing --- is on its own line (possibly with leading whitespace)
+    // We already verified it's at line-start when building allYamlDelimiters,
+    // so no additional check needed here — the fact it's in the list means it's
+    // a valid line-start ---.
+    // Extract from the opening --- to the END of the text, so the markdown body
+    // after the frontmatter is preserved.
+    let block = text.slice(openingPos);
+    // Strip common leading indentation.
+    // IMPORTANT: --- delimiter lines must be preserved as-is (they are structural,
+    // not content) — only content lines participate in minIndent calculation AND
+    // get dedented. Otherwise, if --- has 0 indent but content has 4-space indent,
+    // slicing --- by 4 would destroy the delimiter.
+    const lines = block.split("\n");
+    const minIndent = lines.reduce((min, line) => {
+      if (line.trim() === "" || line.trim() === "---") return min;
+      const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0;
+      return Math.min(min, indent);
+    }, Infinity);
+    if (minIndent > 0 && minIndent < Infinity) {
+      block = lines.map(l => {
+        if (l.trim() === "---") return "---";
+        if (l.trim() === "") return "";
+        return l.slice(minIndent);
+      }).join("\n");
+    }
+    // Post-process: thinking models often wrap the body in a code block
+    // (```...```) and italicize section headings (*## heading*).
+    // Strip these artifacts so downstream parsers (parseMemo) can work.
+    block = stripThinkingModelArtifacts(block);
+    // Validate: skip this --- block if it looks like a prompt template example
+    // (contains placeholder text like "<一句话" or chapter: 12 with the example goal)
+    // rather than actual memo content with real section headings.
+    const hasRealSections = block.includes("## 当前任务") || block.includes("## Current task")
+      || block.includes("## 读者此刻在等什么") || block.includes("## What the reader is waiting for");
+    const isTemplateExample = block.includes("<一句话") || block.includes("<one sentence")
+      || (block.includes("chapter: 12") && block.includes("把七号门被动过手脚"));
+    if (isTemplateExample && !hasRealSections) continue;
+    return block;
+  }
+
+  // Strategy 2: Code block with structured content
+  // Extract the content inside ```yaml ... ```, strip common indentation,
+  // and return it. If it contains --- frontmatter, that's the answer.
+  const codeBlockMatch = text.match(/```(?:yaml|yml|json|markdown|md)?\s*\n([\s\S]*?)```/);
+  if (codeBlockMatch && codeBlockMatch[1]) {
+    let blockContent = codeBlockMatch[1].trim();
+    // Strip common leading indentation (e.g., "    ---" -> "---")
+    const lines = blockContent.split("\n");
+    const minIndent = lines.reduce((min, line) => {
+      if (line.trim() === "") return min;
+      const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0;
+      return Math.min(min, indent);
+    }, Infinity);
+    if (minIndent > 0 && minIndent < Infinity) {
+      blockContent = lines.map(l => l.slice(minIndent)).join("\n");
+    }
+    // If the stripped content starts with ---, it's YAML frontmatter
+    if (blockContent.startsWith("---")) {
+      return blockContent;
+    }
+    // Otherwise wrap in --- if it looks like YAML
+    if (/^[a-zA-Z_\u4e00-\u9fff]/.test(blockContent) && blockContent.includes(":")) {
+      return `---\n${blockContent}\n---`;
+    }
+    return blockContent;
+  }
+
+  // Strategy 3: Common section markers that indicate the start of the answer
+  const markers = [
+    /(?:最终答案|最终输出|最终结果|Final Answer|Final Output|Result|Output)[:：]\s*\n/i,
+    /(?:答案如下|输出如下|结果如下|Here is the output|Here is the result)[:：]?\s*\n/i,
+  ];
+  for (const marker of markers) {
+    const match = text.match(marker);
+    if (match && match.index !== undefined) {
+      return text.slice(match.index + match[0].length);
+    }
+  }
+
+  // Strategy 4: Extract trailing structured content (YAML-like key: value lines)
+  // Many thinking models output reasoning first, then the structured answer at the end.
+  // Look for the largest contiguous block of YAML-like lines at the end of the text.
+  const lines = text.split("\n");
+  let yamlBlockStart = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim();
+    const isYamlLine = /^[a-zA-Z_\u4e00-\u9fff][\w\u4e00-\u9fff]*:/.test(line)
+      || line.startsWith("- ")
+      || (line === "" && yamlBlockStart >= 0);  // blank lines within YAML block
+    if (isYamlLine) {
+      yamlBlockStart = i;
+    } else if (line.startsWith("#") && yamlBlockStart >= 0) {
+      // Markdown headers within the block — still part of structured output
+      yamlBlockStart = i;
+    } else {
+      break;
+    }
+  }
+  if (yamlBlockStart >= 0) {
+    const yamlBlock = lines.slice(yamlBlockStart).join("\n").trim();
+    // Only use this if it's substantial enough (at least 3 non-blank lines)
+    const nonBlankLines = yamlBlock.split("\n").filter(l => l.trim()).length;
+    if (nonBlankLines >= 3) {
+      // Wrap in --- delimiters so downstream YAML frontmatter parsers can find it
+      return `---\n${yamlBlock}\n---`;
+    }
+  }
+
+  // Strategy 5: Find a contiguous block of planner-style section headings (## 当前任务, etc.)
+  // Thinking models often output the structured answer in reasoning_content without
+  // YAML frontmatter. The answer is recognizable by multiple ## headings that match
+  // the planner memo format. Find the earliest such heading and extract from there.
+  const plannerHeadings = [
+    "## 当前任务", "## Current task",
+    "## 读者此刻在等什么", "## What the reader is waiting for right now",
+    "## 该兑现的", "## To pay off",
+    "## 日常/过渡承担什么任务", "## What the slow / transitional beats carry",
+    "## 关键抉择过三连问", "## Three-question check",
+    "## 章尾必须发生的改变", "## Required end-of-chapter change",
+    "## 本章 hook 账", "## Hook ledger for this chapter",
+    "## 不要做", "## Do not",
+  ];
+  // Find all positions of planner headings in the text
+  const headingPositions: { pos: number; heading: string }[] = [];
+  for (const heading of plannerHeadings) {
+    let searchFrom = 0;
+    while (searchFrom < text.length) {
+      const pos = text.indexOf(heading, searchFrom);
+      if (pos < 0) break;
+      headingPositions.push({ pos, heading });
+      searchFrom = pos + heading.length;
+    }
+  }
+  headingPositions.sort((a, b) => a.pos - b.pos);
+  // Find the earliest position where at least 3 distinct planner headings appear
+  // within a reasonable window (5000 chars — a typical memo is 1000-3000 chars)
+  if (headingPositions.length >= 3) {
+    for (let start = 0; start <= headingPositions.length - 3; start++) {
+      const windowStart = headingPositions[start]!.pos;
+      const uniqueHeadingsInWindow = new Set<string>();
+      for (let j = start; j < headingPositions.length; j++) {
+        if (headingPositions[j]!.pos - windowStart > 5000) break;
+        uniqueHeadingsInWindow.add(headingPositions[j]!.heading);
+      }
+      if (uniqueHeadingsInWindow.size >= 3) {
+        // Found a block with 3+ planner headings. Extract from the earliest heading
+        // to the end of the text. Trim trailing non-memo content (reasoning leftovers).
+        let block = text.slice(windowStart);
+        // Trim trailing lines that look like reasoning/checking (e.g. "现在检查：", "验证：")
+        const blockLines = block.split("\n");
+        let trimEnd = blockLines.length;
+        for (let i = blockLines.length - 1; i >= 0; i--) {
+          const trimmed = blockLines[i]!.trim();
+          if (trimmed === "") { trimEnd = i; continue; }
+          // Stop trimming if we hit a heading or substantial content line
+          if (trimmed.startsWith("## ") || trimmed.startsWith("- ") || trimmed.length > 20) break;
+          // Trim short non-structured lines (reasoning leftovers like "现在检查：")
+          trimEnd = i;
+        }
+        block = blockLines.slice(0, trimEnd).join("\n").trim();
+        // Strip common indentation
+        const bLines = block.split("\n");
+        const minIndent = bLines.reduce((min, line) => {
+          if (line.trim() === "") return min;
+          const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0;
+          return Math.min(min, indent);
+        }, Infinity);
+        if (minIndent > 0 && minIndent < Infinity) {
+          block = bLines.map(l => l.slice(minIndent)).join("\n");
+        }
+        // Strip thinking model artifacts (code blocks, italicized headings)
+        block = stripThinkingModelArtifacts(block);
+        // Try to extract chapter number and goal from the thinking text before the headings
+        const beforeHeadings = text.slice(0, windowStart);
+        const chapterMatch = beforeHeadings.match(/chapter:\s*(\d+)/g);
+        const goalMatch = beforeHeadings.match(/goal:\s*["']?([^\n"']{1,80})["']?/g);
+        const lastChapter = chapterMatch?.[chapterMatch.length - 1]?.match(/(\d+)/)?.[1];
+        const lastGoal = goalMatch?.[goalMatch.length - 1]?.replace(/^goal:\s*["']?/, "").replace(/["']?\s*$/, "");
+        const chapterYaml = lastChapter ? `chapter: ${lastChapter}` : "chapter: 0";
+        const goalYaml = lastGoal ? `goal: "${lastGoal.replace(/"/g, '\\"')}"` : 'goal: "(auto-extracted)"';
+        return `---\n${chapterYaml}\n${goalYaml}\n---\n${block}`;
+      }
+    }
+  }
+
+  // Strategy 6: Return full text — downstream will give a specific parse error
+  return text;
+}
+
 function extractChatContent(json: any): string {
   const message = json?.choices?.[0]?.message;
-  return extractOpenAITextPart(message?.content) || extractOpenAITextPart(message?.reasoning_content);
+  const content = extractOpenAITextPart(message?.content);
+  if (content) return content;
+  // Thinking model fallback: if content is empty/null but reasoning_content exists,
+  // try to extract the structured answer from the reasoning content.
+  const reasoningContent = extractOpenAITextPart(message?.reasoning_content);
+  if (reasoningContent) {
+    const extracted = extractAnswerFromReasoning(reasoningContent);
+    console.warn(`[inkos] Non-stream response has empty content but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
+    return extracted;
+  }
+  return "";
 }
 
 function extractChatDeltaContent(json: any): string {
@@ -636,7 +956,7 @@ function extractChatDeltaReasoningContent(json: any): string {
 
 function extractResponsesContent(json: any): string {
   const output = Array.isArray(json?.output) ? json.output : [];
-  return output
+  const textContent = output
     .flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
     .map((part: any) => {
       if (typeof part?.text === "string") return part.text;
@@ -645,13 +965,43 @@ function extractResponsesContent(json: any): string {
       return "";
     })
     .join("");
+  if (textContent) return textContent;
+  // Thinking model fallback: check for reasoning/thinking output items
+  const thinkingContent = output
+    .filter((item: any) => item?.type === "reasoning" || item?.type === "thinking")
+    .map((item: any) => {
+      if (typeof item?.summary === "string") return item.summary;
+      if (Array.isArray(item?.content)) {
+        return item.content.map((p: any) => p?.text ?? "").join("");
+      }
+      return "";
+    })
+    .join("");
+  if (thinkingContent) {
+    const extracted = extractAnswerFromReasoning(thinkingContent);
+    console.warn(`[inkos] Responses API has 0 text but ${thinkingContent.length} chars of reasoning content — extracted ${extracted.length} chars as answer (thinking model)`);
+    return extracted;
+  }
+  return "";
 }
 
 function extractAnthropicContent(json: any): string {
   const content = Array.isArray(json?.content) ? json.content : [];
-  return content
+  const textContent = content
     .map((part: any) => typeof part?.text === "string" ? part.text : "")
     .join("");
+  if (textContent) return textContent;
+  // Thinking model fallback: check for thinking blocks
+  const thinkingContent = content
+    .filter((part: any) => part?.type === "thinking")
+    .map((part: any) => typeof part?.thinking === "string" ? part.thinking : "")
+    .join("");
+  if (thinkingContent) {
+    const extracted = extractAnswerFromReasoning(thinkingContent);
+    console.warn(`[inkos] Anthropic response has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+    return extracted;
+  }
+  return "";
 }
 
 async function chatCompletionViaCustomAnthropicCompatible(
@@ -664,6 +1014,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
 ): Promise<LLMResponse> {
   const baseUrl = client._piModel?.baseUrl ?? "";
   const errorCtx = { baseUrl, model };
+  const monitor = createStreamMonitor(onStreamProgress);
   const extra = stripReservedKeys(resolved.extra);
   const payload: Record<string, unknown> = {
     model,
@@ -714,8 +1065,8 @@ async function chatCompletionViaCustomAnthropicCompatible(
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
+  let thinkingContent = "";
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  const monitor = createStreamMonitor(onStreamProgress);
 
   try {
     while (true) {
@@ -735,6 +1086,11 @@ async function chatCompletionViaCustomAnthropicCompatible(
           monitor.onChunk(json.delta.text);
           onTextDelta?.(json.delta.text);
         }
+        // Collect thinking deltas for thinking model fallback
+        if (json.type === "content_block_delta" && json.delta?.type === "thinking_delta" && typeof json.delta.thinking === "string") {
+          thinkingContent += json.delta.thinking;
+          monitor.onThinkingChunk(json.delta.thinking);
+        }
         if (json.type === "message_delta" && json.usage) {
           usage.completionTokens = json.usage.output_tokens ?? usage.completionTokens;
         }
@@ -745,6 +1101,13 @@ async function chatCompletionViaCustomAnthropicCompatible(
     }
   } finally {
     monitor.stop();
+  }
+
+  // Thinking model fallback
+  if (!content && thinkingContent) {
+    const extracted = extractAnswerFromReasoning(thinkingContent);
+    console.warn(`[inkos] Anthropic stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+    content = extracted;
   }
 
   if (!content) {
@@ -771,6 +1134,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   const baseUrl = client._piModel?.baseUrl ?? "";
   const headers = buildCustomHeaders(client);
   const errorCtx = { baseUrl, model };
+  const monitor = createStreamMonitor(onStreamProgress);
   const extra = stripReservedKeys(resolved.extra);
 
   if (client.apiFormat === "responses") {
@@ -817,7 +1181,6 @@ async function chatCompletionViaCustomOpenAICompatible(
     let buffer = "";
     let content = "";
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-    const monitor = createStreamMonitor(onStreamProgress);
 
     try {
       while (true) {
@@ -917,7 +1280,6 @@ async function chatCompletionViaCustomOpenAICompatible(
   let content = "";
   let reasoningContent = "";
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  const monitor = createStreamMonitor(onStreamProgress);
 
   try {
     while (true) {
@@ -938,7 +1300,7 @@ async function chatCompletionViaCustomOpenAICompatible(
           const reasoningDelta = extractChatDeltaReasoningContent(json);
           if (reasoningDelta) {
             reasoningContent += reasoningDelta;
-            monitor.onChunk(reasoningDelta);
+            monitor.onThinkingChunk(reasoningDelta);
           }
         }
         if (json?.usage) {
@@ -954,11 +1316,19 @@ async function chatCompletionViaCustomOpenAICompatible(
     monitor.stop();
   }
 
-  const finalContent = content || reasoningContent;
-  if (!finalContent) {
+  // Thinking model fallback: if content is empty but reasoning_content exists,
+  // the model put all its output in the reasoning/thinking channel.
+  // Try to extract the structured answer from the reasoning content.
+  if (!content && reasoningContent) {
+    const extracted = extractAnswerFromReasoning(reasoningContent);
+    console.warn(`[inkos] Stream has 0 content chars but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
+    content = extracted;
+  }
+
+  if (!content) {
     throw wrapLLMError(new Error("LLM returned empty response from stream"), errorCtx);
   }
-  return { content: finalContent, usage };
+  return { content, usage };
 }
 
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
@@ -990,15 +1360,20 @@ export async function chatCompletion(
   const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model };
 
   try {
-    return await withTransientLLMRetry(
-      async () => {
-        if (shouldUseNativeCustomTransport(client)) {
-          return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
-        }
-        return chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta);
+    return await withRateLimitRetry(
+      async () => withTransientLLMRetry(
+        async () => {
+          if (shouldUseNativeCustomTransport(client)) {
+            return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta);
+          }
+          return chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta);
+        },
+        // Retrying after UI text deltas have been emitted can duplicate visible text.
+        { enabled: !onTextDelta },
+      ),
+      (attempt, delayMs) => {
+        console.warn(`[inkos] Rate limited (429) — attempt ${attempt}/${RATE_LIMIT_RETRIES}, waiting ${Math.round(delayMs / 1000)}s before retry...`);
       },
-      // Retrying after UI text deltas have been emitted can duplicate visible text.
-      { enabled: !onTextDelta },
     );
   } catch (error) {
     // Stream interrupted but partial content is usable — return truncated response
@@ -1164,6 +1539,23 @@ async function chatCompletionViaPiAi(
       .filter((block): block is { type: "text"; text: string } => block.type === "text")
       .map((block) => block.text)
       .join("");
+    // Thinking model fallback: check for thinking blocks (ThinkingContent has .thinking, not .text)
+    const thinkingContent = response.content
+      .filter((block): block is PiThinkingContent => block.type === "thinking")
+      .map((block) => block.thinking)
+      .join("");
+    if (!content && thinkingContent) {
+      const extracted = extractAnswerFromReasoning(thinkingContent);
+      console.warn(`[inkos] Pi-ai non-stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+      return {
+        content: extracted,
+        usage: {
+          promptTokens: response.usage.input,
+          completionTokens: response.usage.output,
+          totalTokens: response.usage.totalTokens,
+        },
+      };
+    }
     if (!content) {
       const diag = `usage=${response.usage.input}+${response.usage.output}`;
       console.warn(`[inkos] LLM 非流式响应无文本内容 (${diag})`);
@@ -1181,6 +1573,7 @@ async function chatCompletionViaPiAi(
 
   const eventStream = piStreamSimple(piModel, context, streamOpts);
   const chunks: string[] = [];
+  const thinkingChunks: string[] = [];
   const monitor = createStreamMonitor(onStreamProgress);
   let inputTokens = 0;
   let outputTokens = 0;
@@ -1191,6 +1584,11 @@ async function chatCompletionViaPiAi(
         chunks.push(event.delta);
         monitor.onChunk(event.delta);
         onTextDelta?.(event.delta);
+      }
+      // Collect thinking deltas for thinking model fallback
+      if (event.type === "thinking_delta") {
+        thinkingChunks.push(event.delta);
+        monitor.onThinkingChunk(event.delta);
       }
       if (event.type === "done" || event.type === "error") {
         const msg = event.type === "done" ? event.message : event.error;
@@ -1218,10 +1616,28 @@ async function chatCompletionViaPiAi(
   }
 
   const content = chunks.join("");
+  // Thinking model fallback: if content is empty but thinking/reasoning content exists,
+  // try to extract the structured answer from the thinking content.
+  if (!content && thinkingChunks.length > 0) {
+    const thinkingContent = thinkingChunks.join("");
+    const extracted = extractAnswerFromReasoning(thinkingContent);
+    console.warn(`[inkos] Pi-ai stream has 0 text_delta but ${thinkingContent.length} chars of thinking_delta — extracted ${extracted.length} chars as answer (thinking model)`);
+    console.warn(`[inkos] thinking_delta tail (last 800 chars): ${JSON.stringify(thinkingContent.slice(-800))}`);
+    console.warn(`[inkos] extracted preview (first 500 chars): ${JSON.stringify(extracted.slice(0, 500))}`);
+    return {
+      content: extracted,
+      usage: {
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      },
+    };
+  }
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;
+    const hint = "If using a thinking/reasoning model, ensure thinkingBudget=0 or the model returns content after reasoning.";
     console.warn(`[inkos] LLM 流式响应无文本内容 (${diag})`);
-    throw new Error(`LLM returned empty response from stream (${diag})`);
+    throw new Error(`LLM returned empty response from stream (${diag}). ${hint}`);
   }
 
   return {

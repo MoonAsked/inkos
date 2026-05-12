@@ -16,6 +16,11 @@ export const LONGCAT: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "LongCat-Flash-Lite", maxOutput: 4096, contextWindowTokens: 327680, enabled: true, releasedAt: "2026-02-05" },
     { id: "LongCat-Flash-Thinking-2601", maxOutput: 4096, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-01-14" },

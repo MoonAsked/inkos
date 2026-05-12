@@ -1,6 +1,5 @@
 import { getEndpoint } from "./providers/index.js";
 import { probeModelsFromUpstream } from "./providers/probe.js";
-import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
 
 export interface ServicePreset {
   readonly providerFamily: "openai" | "anthropic";
@@ -47,6 +46,8 @@ export const SERVICE_PRESETS: Record<string, ServicePreset> = {
   ppio:        { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://api.ppinfra.com/v3/openai",                  label: "PPIO" },
   openrouter:  { providerFamily: "openai",    api: "openai-responses",   baseUrl: "https://openrouter.ai/api/v1",                       label: "OpenRouter",      piProvider: "openrouter" },
   ollama:      { providerFamily: "openai",    api: "openai-completions", baseUrl: "http://localhost:11434/v1",                          label: "Ollama (本地)" },
+  nvidia:      { providerFamily: "openai",    api: "openai-completions", baseUrl: "https://integrate.api.nvidia.com/v1",                label: "NVIDIA NIM" },
+  llamacpp:    { providerFamily: "openai",    api: "openai-completions", baseUrl: "http://localhost:8080/v1",                          label: "llama.cpp (本地)" },
   custom:      { providerFamily: "openai",    api: "openai-completions", baseUrl: "",                                                    label: "自定义端点" },
 };
 
@@ -170,9 +171,8 @@ export async function listModelsForService(
   // 1) 先试 live /models probe
   const probeBaseUrl = liveBaseUrl || provider?.modelsBaseUrl || provider?.baseUrl || resolveServiceModelsBaseUrl(service);
   const providerFamily = preset?.providerFamily ?? (provider?.api.startsWith("anthropic") ? "anthropic" : "openai");
-  const canProbeWithoutApiKey = isApiKeyOptionalForEndpoint({ provider: providerFamily, baseUrl: probeBaseUrl });
-  if ((apiKey || canProbeWithoutApiKey) && probeBaseUrl) {
-    const probed = await probeModelsFromUpstream(probeBaseUrl, apiKey ?? "", 10_000);
+  if (apiKey && probeBaseUrl) {
+    const probed = await probeModelsFromUpstream(probeBaseUrl, apiKey, 10_000);
     if (probed.length > 0) {
       const { lookupModel } = await import("./providers/lookup.js");
       for (const m of probed) {

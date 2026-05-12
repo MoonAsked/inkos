@@ -17,6 +17,11 @@ export const WENXIN: InkosEndpoint = {
   temperatureRange: [0, 1],
   defaultTemperature: 0.95,
   writingTemperature: 0.95,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "ernie-5.0-thinking-latest", maxOutput: 65536, contextWindowTokens: 131072, enabled: true, releasedAt: "2025-11-12" },
     { id: "ernie-5.0-thinking-preview", maxOutput: 65536, contextWindowTokens: 131072, releasedAt: "2025-11-12" },

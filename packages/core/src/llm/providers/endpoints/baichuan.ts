@@ -17,6 +17,11 @@ export const BAICHUAN: InkosEndpoint = {
   temperatureRange: [0, 1],
   defaultTemperature: 0.3,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "Baichuan4", maxOutput: 4096, contextWindowTokens: 32768, enabled: true },
     { id: "Baichuan4-Turbo", maxOutput: 4096, contextWindowTokens: 32768, enabled: true },

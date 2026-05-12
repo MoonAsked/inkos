@@ -17,6 +17,11 @@ export const STEPFUN: InkosEndpoint = {
   temperatureRange: [0, 1],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "step-3.5-flash", maxOutput: 4096, contextWindowTokens: 256000, enabled: true },
     { id: "step-3", maxOutput: 4096, contextWindowTokens: 64000, enabled: true },

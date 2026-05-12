@@ -17,6 +17,12 @@ export const SENSENOVA: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+    supportsUsageInStreaming: true,
+  },
   models: [
     { id: "SenseNova-V6-5-Pro", maxOutput: 4096, contextWindowTokens: 131072, enabled: true, releasedAt: "2025-07-23" },
     { id: "SenseNova-V6-5-Turbo", maxOutput: 4096, contextWindowTokens: 131072, enabled: true, releasedAt: "2025-07-23" },

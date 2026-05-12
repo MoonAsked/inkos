@@ -17,6 +17,11 @@ export const AI360: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.5,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "360zhinao3-o1.5", maxOutput: 4096, contextWindowTokens: 128000, enabled: true },
     { id: "360zhinao2-o1.5", maxOutput: 4096, contextWindowTokens: 128000 },

@@ -18,6 +18,11 @@ export const MISTRAL: InkosEndpoint = {
   temperatureRange: [0, 1],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "devstral-2512", maxOutput: 4096, contextWindowTokens: 262144, releasedAt: "2025-12-09" },
     { id: "labs-devstral-small-2512", maxOutput: 4096, contextWindowTokens: 262144, releasedAt: "2025-12-09" },

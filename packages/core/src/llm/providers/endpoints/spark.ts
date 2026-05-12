@@ -21,6 +21,11 @@ export const SPARK: InkosEndpoint = {
   temperatureRange: [0, 1],
   defaultTemperature: 0.5,
   writingTemperature: 0.95,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     // id 即官方文档 model 字段。对应产品名写在行尾注释
     { id: "4.0Ultra", maxOutput: 32768, contextWindowTokens: 32768, enabled: true }, // Spark 4.0 Ultra

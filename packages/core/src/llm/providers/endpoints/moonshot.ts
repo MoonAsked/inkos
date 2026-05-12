@@ -20,6 +20,11 @@ export const MOONSHOT: InkosEndpoint = {
   defaultTemperature: 0.3,
   writingTemperature: 1,
   temperatureHint: "kimi-k2.5/k2.6 推荐 temperature=1.0",
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "kimi-k2.6", maxOutput: 32768, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-04-21", temperature: 1 },
     { id: "kimi-k2.5", maxOutput: 32768, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-01-27", temperature: 1 },

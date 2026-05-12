@@ -17,6 +17,11 @@ export const INTERNLM: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.8,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "intern-latest", maxOutput: 4096, contextWindowTokens: 262144, releasedAt: "2026-02-04" },
     { id: "intern-s1-pro", maxOutput: 4096, contextWindowTokens: 262144, enabled: true, releasedAt: "2026-02-04" },

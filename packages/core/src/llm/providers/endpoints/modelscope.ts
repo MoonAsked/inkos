@@ -17,6 +17,11 @@ export const MODELSCOPE: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "Qwen/Qwen3-Next-80B-A3B-Thinking", maxOutput: 4096, contextWindowTokens: 131072 },
     { id: "Qwen/Qwen3-Next-80B-A3B-Instruct", maxOutput: 4096, contextWindowTokens: 131072 },

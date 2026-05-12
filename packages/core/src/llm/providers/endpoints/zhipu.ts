@@ -19,6 +19,11 @@ export const ZHIPU: InkosEndpoint = {
   temperatureRange: [0, 1],
   defaultTemperature: 0.95,
   writingTemperature: 0.95,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "glm-5.1", maxOutput: 131072, contextWindowTokens: 200000, enabled: true, releasedAt: "2026-03-27" },
     { id: "glm-5-turbo", maxOutput: 131072, contextWindowTokens: 200000, releasedAt: "2026-03-15" },

@@ -17,6 +17,11 @@ export const VOLCENGINE: InkosEndpoint = {
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: "max_tokens",
+  },
   models: [
     { id: "doubao-seed-2.0-pro", maxOutput: 32000, contextWindowTokens: 256000, enabled: true, releasedAt: "2026-02-15" },
     { id: "doubao-seed-2.0-lite", maxOutput: 32000, contextWindowTokens: 256000, enabled: true, releasedAt: "2026-02-15" },
