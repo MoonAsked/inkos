@@ -303,6 +303,7 @@ export interface PlannerUserMessageInput {
   readonly isGoldenOpening: boolean;
   readonly bookRulesRelevant: string;
   readonly brief?: string;
+  readonly chapterContext?: string;
   readonly language?: "zh" | "en";
 }
 
