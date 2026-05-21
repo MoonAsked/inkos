@@ -2,9 +2,10 @@ import { BaseAgent } from "./base.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { readGenreProfile } from "./rules-reader.js";
-import { writeFile, mkdir, rm } from "node:fs/promises";
+import { writeFile, mkdir, rm, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { renderHookSnapshot } from "../utils/memory-retrieval.js";
+import { sanitizeRoleFileName, canonicalRoleName } from "../utils/outline-paths.js";
 import {
   shouldPromoteHook,
   type PromotionContext,
@@ -36,7 +37,7 @@ import type { StoredHook } from "../state/memory-db.js";
 //     （consolidator 每章追加），建书时架构师不产出结构化初始态。
 //
 // Budget table (4 content items — LLM sections):
-//   story_frame ≤ 3000 chars / volume_map ≤ 5000 chars / roles 总 ≤ 8000 chars
+//   story_frame ≤ 3000 chars / volume_map ≤ 4000 chars / roles 总 ≤ 8000 chars
 //   book_rules ≤ 500 chars (YAML only) / pending_hooks ≤ 2000 chars
 //
 // 输出落盘 contract（未变）：
@@ -120,6 +121,7 @@ export class ArchitectAgent extends BaseAgent {
     const { profile: gp, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
     const resolvedLanguage = book.language ?? gp.language;
+    this.log?.debug(`[architect] generateFoundation: genre=${book.genre}, language=${resolvedLanguage}, title="${book.title}"`);
 
     const contextBlock = externalContext
       ? `\n\n## 外部指令\n以下是来自外部系统的创作指令，请将其融入设定中：\n\n${externalContext}\n`
@@ -148,10 +150,12 @@ export class ArchitectAgent extends BaseAgent {
 
     const maxParseRetries = 2;
     for (let attempt = 0; attempt <= maxParseRetries; attempt++) {
+      this.log?.debug(`[architect] generateFoundation: LLM call attempt ${attempt + 1}/${maxParseRetries + 1}, maxTokens=131072, temperature=0.8`);
       const response = await this.chat([
         { role: "system", content: langPrefix + systemPrompt + revisePrompt },
         { role: "user", content: userMessage },
-      ], { maxTokens: 20480, temperature: 0.8 });
+      ], { maxTokens: 131072, temperature: 0.8 });
+      this.log?.debug(`[architect] generateFoundation: LLM response received, ${response.content.length} chars`);
 
       try {
         return this.parseSections(response.content, resolvedLanguage);
@@ -161,8 +165,8 @@ export class ArchitectAgent extends BaseAgent {
         if (isMissingSections && attempt < maxParseRetries) {
           this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): ${msg} — retrying with feedback`);
           const retryFeedback = resolvedLanguage === "en"
-            ? `\n\n[IMPORTANT — your previous output was missing required sections. You MUST produce ALL 5 sections: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===. Do not stop until all 5 are complete.]`
-            : `\n\n[重要——你上次的输出缺少必要 section。必须输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。不要在完成前停止。]`;
+            ? `\n\n[CRITICAL — your previous output was INCOMPLETE. It was missing required sections because earlier sections exceeded their char budgets and consumed all output tokens. You MUST:\n1. STRICTLY obey the HARD BUDGET: story_frame ≤ 3000, volume_map ≤ 4000, roles ≤ 8000, book_rules ≤ 500, pending_hooks ≤ 2000.\n2. Produce ALL 5 sections in order: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===.\n3. If any section feels too long, COMPRESS it. Do NOT let any section exceed its budget.\n4. Output is only complete after the last row of pending_hooks.]`
+            : `\n\n[严重——你上次的输出不完整。缺少必要 section 的原因是前面的 section 超出了字符预算，耗尽了输出 token。你必须：\n1. 严格遵守硬预算：story_frame ≤ 3000、volume_map ≤ 5000、roles ≤ 8000、book_rules ≤ 500、pending_hooks ≤ 2000。\n2. 按顺序输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。\n3. 如果任何 section 太长，必须压缩。任何 section 不得超过预算。\n4. 输出只有在 pending_hooks 最后一行写完后才算完成。]`;
           userMessage += retryFeedback;
           continue;
         }
@@ -246,10 +250,12 @@ ${eraBlock}
 
 ## 预算（超预算必删）
 - story_frame ≤ 3000 chars
-- volume_map ≤ 5000 chars
+- volume_map ≤ 4000 chars
 - roles 总 ≤ 8000 chars
 - book_rules ≤ 500 chars（仅 YAML）
 - pending_hooks ≤ 2000 chars
+
+**强制完成规则：必须按顺序输出全部 5 个 section。最常见的失败是 volume_map 写太长后停止。如果 volume_map 感觉太长，压缩——合并卷、缩短段落。绝不让 volume_map 超过 4000 字符。输出只有在 pending_hooks 最后一行写完后才算完成。**
 
 === SECTION: story_frame ===
 
@@ -362,7 +368,7 @@ name: <次要角色名>
 
 === SECTION: book_rules ===
 
-**只输出 YAML frontmatter 一块——零散文。** 所有的"叙事视角 / 本书专属规则 / 核心冲突驱动"等散文已经合并到 story_frame.世界观底色，不要在这里重复写。
+**⚠️ 严格限制：只输出 YAML frontmatter 一块，≤500 字符，零散文。** 超过 500 字符会被硬截断。所有的"叙事视角 / 本书专属规则 / 核心冲突驱动"等散文已经合并到 story_frame.世界观底色，不要在这里重复写。YAML 只保留关键字段，删除所有注释和说明性文字。
 \`\`\`
 ---
 version: "1.0"
@@ -411,7 +417,7 @@ enableFullCastTracking: false
 - **pending_hooks 表必须包含 Phase 7 扩展列——depends_on 标出因果链、pays_off_in_arc 锁定回收大致位置、core_hook 标记主线承重伏笔（3-7 条）、half_life 仅给重点伏笔设置**
 
 ## 硬性完结检查（生成前读一遍）
-必须依次输出全部 **5 个 SECTION 块**：story_frame → volume_map → roles → book_rules → pending_hooks，不允许因为 story_frame 或 volume_map 写长了就不写后 3 段。哪怕 roles 只列 3 个角色、book_rules 只有 YAML 小块、pending_hooks 只有 3 行，也要完整输出。只有写完 pending_hooks 最后一行才算交付。`;
+必须依次输出全部 **5 个 SECTION 块**：story_frame → volume_map → roles → book_rules → pending_hooks，不允许因为 story_frame 或 volume_map 写长了就不写后 3 段。哪怕 roles 只列 3 个角色、book_rules 只有 YAML 小块、pending_hooks 只有 3 行，也要完整输出。只有写完 pending_hooks 最后一行才算交付。**book_rules 绝对不能超过 500 字符——只写 YAML，不写散文，不写注释。**`;
   }
 
   private buildEnglishFoundationPrompt(
@@ -448,10 +454,12 @@ Do not duplicate the same fact across sections. The protagonist's arc lives only
 
 ## Output budget (over-budget means cut)
 - story_frame ≤ 3000 chars
-- volume_map ≤ 5000 chars
+- volume_map ≤ 4000 chars
 - roles ≤ 8000 chars total
 - book_rules ≤ 500 chars (YAML only)
 - pending_hooks ≤ 2000 chars
+
+**MANDATORY COMPLETION RULE: You MUST emit ALL 5 sections in order. The most common failure is stopping after volume_map because it ran long. If volume_map feels too long, COMPRESS it — merge volumes, shorten paragraphs. NEVER let volume_map exceed 4000 chars. Output is ONLY complete after the last row of pending_hooks.**
 
 === SECTION: story_frame ===
 
@@ -556,7 +564,7 @@ name: <minor name>
 
 === SECTION: book_rules ===
 
-**Output ONLY the YAML frontmatter block — zero prose.** All narrative guidance (perspective, book-specific rules, core conflict driver) has moved into story_frame.03_World_Tonal_Ground. Do not repeat it here.
+**⚠️ STRICT: Output ONLY the YAML frontmatter block, ≤500 chars, zero prose. Output exceeding 500 chars will be hard-truncated.** All narrative guidance (perspective, book-specific rules, core conflict driver) has moved into story_frame.03_World_Tonal_Ground. Do not repeat it here. Keep only essential YAML fields, remove all comments and explanatory text.
 \`\`\`
 ---
 version: "1.0"
@@ -605,16 +613,18 @@ Rules:
 - **pending_hooks table MUST carry Phase 7 extended columns — depends_on spells out the causal chain, pays_off_in_arc locks the approximate payoff location, core_hook marks main-line load-bearing hooks (3-7 per book), half_life only on priority hooks**
 
 ## Hard completeness check (read before generating)
-You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → roles → book_rules → pending_hooks. Do NOT stop after story_frame or volume_map just because they ran long. Even if roles lists only 3 characters, book_rules is a tiny YAML block, and pending_hooks has only 3 rows, all five must appear. The output is only considered delivered after the last row of pending_hooks is written.`;
+You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → roles → book_rules → pending_hooks. Do NOT stop after story_frame or volume_map just because they ran long. Even if roles lists only 3 characters, book_rules is a tiny YAML block, and pending_hooks has only 3 rows, all five must appear. The output is only considered delivered after the last row of pending_hooks is written. **book_rules MUST NOT exceed 500 chars — YAML only, no prose, no comments.**`;
   }
 
   // -------------------------------------------------------------------------
   // Parsing
   // -------------------------------------------------------------------------
   private parseSections(content: string, language: "zh" | "en"): ArchitectOutput {
+    this.log?.debug(`[architect] parseSections: input ${content.length} chars, language=${language}`);
     const parsedSections = new Map<string, string>();
     const sectionPattern = /^\s*===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===\s*$/gim;
     const matches = [...content.matchAll(sectionPattern)];
+    this.log?.debug(`[architect] parseSections: found ${matches.length} SECTION markers`);
 
     for (let i = 0; i < matches.length; i++) {
       const match = matches[i]!;
@@ -623,6 +633,29 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
       const end = matches[i + 1]?.index ?? content.length;
       const normalizedName = this.normalizeSectionName(rawName);
       parsedSections.set(normalizedName, content.slice(start, end).trim());
+    }
+
+    // Debug: log each parsed section's character count
+    for (const [name, secContent] of parsedSections) {
+      this.log?.debug(`[architect] parseSections section "${name}": ${secContent.length} chars`);
+    }
+
+    // Hard budget enforcement: truncate sections that exceed their char budget
+    // so that an over-long section (especially book_rules) cannot crowd out
+    // later sections like pending_hooks.
+    const SECTION_BUDGET: Record<string, number> = {
+      story_frame: 3000,
+      volume_map: 4000,
+      roles: 8000,
+      book_rules: 500,
+      pending_hooks: 2000,
+    };
+    for (const [name, budget] of Object.entries(SECTION_BUDGET)) {
+      const raw = parsedSections.get(name);
+      if (raw && raw.length > budget) {
+        this.log?.warn(`[architect] Section "${name}" over budget: ${raw.length} > ${budget} chars — truncating`);
+        parsedSections.set(name, raw.slice(0, budget));
+      }
     }
 
     // Phase 5 new sections take precedence.
@@ -668,18 +701,23 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     if (!pendingHooksRaw) missing.push("pending_hooks");
     if (missing.length > 0) {
       const foundSections = [...parsedSections.keys()].filter(k => k);
-      const contentPreview = content.length > 300 ? content.slice(0, 300) + "…" : content;
+      const showPreview = process.env.INKOS_LOG_LLM_OUTPUT === "1" || process.env.INKOS_LOG_LLM_OUTPUT === "true";
+      const previewPart = showPreview
+        ? `, preview: ${JSON.stringify(content.length > 300 ? content.slice(0, 300) + "…" : content)}`
+        : "";
       throw new Error(
         `Architect output missing required section${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}` +
-        ` (found: [${foundSections.join(", ")}], raw length: ${content.length}, preview: ${JSON.stringify(contentPreview)})`,
+        ` (found: [${foundSections.join(", ")}], raw length: ${content.length}${previewPart})`,
       );
     }
 
     const roles = this.parseRoles(rolesRaw);
+    this.log?.debug(`[architect] parseSections: parsed ${roles.length} roles`);
     const pendingHooks = this.normalizePendingHooksSection(
       this.stripTrailingAssistantCoda(pendingHooksRaw!),
       effectiveVolumeMap,
     );
+    this.log?.debug(`[architect] parseSections: normalized ${pendingHooks.length} pending hooks`);
 
     // Synthesize legacy-facing content from new prose (so back-compat callers
     // still receive real content instead of empty strings).
@@ -733,6 +771,94 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     }
 
     return roles;
+  }
+
+  /**
+   * Prepare role file writes with cross-tier dedup and existing-name matching.
+   *
+   * 1. Dedup within the new roles list: if the same canonical name appears
+   *    with both major and minor tier, keep major (it takes precedence).
+   * 2. Scan existing role files on disk to find matching canonical names;
+   *    reuse the existing file name so we overwrite instead of creating
+   *    a duplicate (e.g. existing "_杨洛_.md" → write as "杨洛.md").
+   * 3. Remove stale files from the opposite tier directory when a role
+   *    is promoted/demoted (e.g. role was in 次要角色/ but now is major).
+   */
+  private async prepareRoleWrites(
+    roles: ReadonlyArray<ArchitectRole>,
+    majorDir: string,
+    minorDir: string,
+  ): Promise<Array<Promise<void>>> {
+    // Step 1: dedup within new roles — major wins over minor
+    const deduped: ArchitectRole[] = [];
+    const seenCanonical = new Map<string, "major" | "minor">();
+    for (const role of roles) {
+      const canon = canonicalRoleName(role.name);
+      if (!canon) continue;
+      const prev = seenCanonical.get(canon);
+      if (prev === undefined) {
+        seenCanonical.set(canon, role.tier);
+        deduped.push(role);
+      } else if (prev === "minor" && role.tier === "major") {
+        // major wins — replace the previous minor entry
+        seenCanonical.set(canon, "major");
+        const idx = deduped.findIndex(
+          (r) => canonicalRoleName(r.name) === canon,
+        );
+        if (idx >= 0) deduped[idx] = role;
+      }
+      // else: already major or same tier — keep first
+    }
+
+    // Step 2: scan existing files to build canonical→fileName map
+    const existingFiles = new Map<string, { fileName: string; dir: string }>();
+    const scanDir = async (dir: string) => {
+      let entries: string[];
+      try { entries = await readdir(dir); } catch { return; }
+      for (const entry of entries) {
+        if (!entry.endsWith(".md")) continue;
+        const baseName = entry.replace(/\.md$/, "");
+        const canon = canonicalRoleName(baseName);
+        if (canon && !existingFiles.has(canon)) {
+          existingFiles.set(canon, { fileName: baseName, dir });
+        }
+      }
+    };
+    await Promise.all([scanDir(majorDir), scanDir(minorDir)]);
+
+    // Step 3: prepare writes and stale-file removals
+    const writes: Array<Promise<void>> = [];
+    const deletions: Array<Promise<void>> = [];
+
+    for (const role of deduped) {
+      const canon = canonicalRoleName(role.name);
+      if (!canon) continue;
+      const targetDir = role.tier === "major" ? majorDir : minorDir;
+      const oppositeDir = role.tier === "major" ? minorDir : majorDir;
+
+      // Use existing file name if we find a match on disk, otherwise sanitize
+      const existing = existingFiles.get(canon);
+      const safeName = existing
+        ? existing.fileName
+        : sanitizeRoleFileName(role.name);
+      if (!safeName) continue;
+
+      writes.push(writeFile(join(targetDir, `${safeName}.md`), role.content, "utf-8"));
+
+      // Remove stale file from opposite tier if it exists there
+      let oppositeEntries: string[];
+      try { oppositeEntries = await readdir(oppositeDir); } catch { continue; }
+      for (const entry of oppositeEntries) {
+        if (!entry.endsWith(".md")) continue;
+        const entryCanon = canonicalRoleName(entry.replace(/\.md$/, ""));
+        if (entryCanon === canon) {
+          deletions.push(rm(join(oppositeDir, entry), { force: true }));
+        }
+      }
+    }
+
+    await Promise.all(deletions);
+    return writes;
   }
 
   private buildStoryBibleShim(storyFrame: string, language: "zh" | "en"): string {
@@ -910,13 +1036,11 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
       writes.push(writeFile(join(outlineDir, rhythmFileName), rhythmPrinciples, "utf-8"));
     }
 
-    // Roles — one file per character
-    for (const role of roles) {
-      const targetDir = role.tier === "major" ? rolesMajorDir : rolesMinorDir;
-      const safeName = role.name.replace(/[/\\:*?"<>|]/g, "_").trim();
-      if (!safeName) continue;
-      writes.push(writeFile(join(targetDir, `${safeName}.md`), role.content, "utf-8"));
-    }
+    // Roles — one file per character, with cross-tier dedup and name matching
+    const roleWrites = await this.prepareRoleWrites(
+      roles, rolesMajorDir, rolesMinorDir,
+    );
+    writes.push(...roleWrites);
 
     // Compat shims — these are pointer files, not authoritative content.
     writes.push(writeFile(
@@ -996,6 +1120,7 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     const { profile: gp, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
     const resolvedLanguage = book.language ?? gp.language;
+    this.log?.debug(`[architect] generateFoundationFromImport: genre=${book.genre}, language=${resolvedLanguage}, importMode=${options?.importMode ?? "default"}, chaptersText=${chaptersText.length} chars`);
     const reviewFeedbackBlock = this.buildReviewFeedbackBlock(reviewFeedback, resolvedLanguage);
 
     const contextBlock = externalContext
@@ -1046,6 +1171,44 @@ ${continuationDirective}
 ## Output contract
 Follow the consolidated 5-section === SECTION: === layout: story_frame, volume_map, roles, book_rules, pending_hooks. Do NOT emit rhythm_principles or current_state — rhythm principles live in the last paragraph of volume_map; character initial status lives in roles.Current_State; initial hooks live in pending_hooks start_chapter=0 rows; era / setting anchors (only when the genre pins to a real year) are woven into story_frame's world-tonal-ground paragraph.
 
+### HARD BUDGET (output exceeding budget WILL be truncated — you lose content):
+- story_frame: ≤ 3000 chars (4 paragraphs, ~600-900 chars each)
+- volume_map: ≤ 4000 chars (COMPRESS existing chapters into brief review paragraphs; detailed chapter-by-chapter is NOT needed here)
+- roles: total ≤ 8000 chars (major characters: 2-3; minor: 3-5; keep each card concise)
+- book_rules: ≤ 500 chars — **YAML frontmatter ONLY, zero prose, zero comments**. All narrative guidance goes into story_frame.
+- pending_hooks: ≤ 2000 chars
+
+**CRITICAL: book_rules must be a tiny YAML block (≤500 chars). Do NOT write prose, explanations, or chapter-by-chapter updates in book_rules. If book_rules exceeds 500 chars, it will be hard-truncated and you lose all content after 500 chars.**
+
+**MANDATORY COMPLETION RULE: You MUST emit ALL 5 sections in order. The most common failure mode is stopping after volume_map because it ran long. If volume_map feels too long, COMPRESS it — merge review paragraphs, shorten chapter descriptions. NEVER let volume_map exceed 4000 chars. Output is ONLY complete after the last row of pending_hooks. Before finishing, verify: did I write === SECTION: story_frame ===? === SECTION: volume_map ===? === SECTION: roles ===? === SECTION: book_rules ===? === SECTION: pending_hooks ===? If any is missing, write it NOW.**
+
+### roles section format (strict):
+One card per character, delimited as follows:
+---ROLE---
+tier: major  (or minor)
+name: <character name>
+---CONTENT---
+## Core Tags
+(3-5 keywords)
+
+## Contradicting Details
+(1-2 specific details that contradict the tags)
+
+## Background (past experience)
+
+## Current State (chapter N status)
+
+## Relationship Network
+
+## Inner Drive
+
+## Growth Arc
+---ROLE---
+tier: minor
+name: <character name>
+---CONTENT---
+... (minor characters can be brief)
+
 All prose must be derived from the source package. Do not invent settings. If the package says it is compressed, treat chapter catalog + excerpts as evidence for the foundation; the full chapters will be replayed later for detailed truth files. For volume_map, treat existing chapters as "review" (one paragraph) and continuation as prose chapter-level planning. Hook extraction must be complete for the evidence provided.
 
 All output MUST be written in English.`
@@ -1067,6 +1230,44 @@ ${continuationDirective}
 ## 输出契约
 合并后的 5 段 === SECTION: === 结构：story_frame / volume_map / roles / book_rules / pending_hooks。**不要输出 rhythm_principles 或 current_state 两个 section**——节奏原则合并进 volume_map 尾段，角色初始状态合并进 roles.当前现状，初始钩子写在 pending_hooks startChapter=0 行；环境/时代锚（只有年代文 / 历史同人 / 都市重生等真实年份题材需要）织进 story_frame.世界观底色，其他题材直接省略。
 
+### 硬预算（超预算必截断——你会丢失内容）：
+- story_frame ≤ 3000 chars（4 段散文，每段约 600-900 字）
+- volume_map ≤ 4000 chars（已有章节压缩为简短回顾段，不需要逐章详述）
+- roles 总 ≤ 8000 chars（主要角色 2-3 人；次要 3-5 人；每张卡保持精炼）
+- book_rules ≤ 500 chars — **仅 YAML frontmatter，零散文，零注释**。所有叙事指导已合并进 story_frame.世界观底色。
+- pending_hooks ≤ 2000 chars
+
+**关键：book_rules 必须是一个极小的 YAML 块（≤500 字符）。不要在 book_rules 里写散文、解释或逐章更新。超过 500 字符会被硬截断，截断后内容全部丢失。**
+
+**强制完成规则：必须按顺序输出全部 5 个 section。最常见的失败模式是 volume_map 写得太长后停止输出。如果 volume_map 感觉太长，必须压缩——合并回顾段、缩短章节描述。绝不让 volume_map 超过 4000 字符。输出只有在 pending_hooks 最后一行写完后才算完成。写完前自检：我写了 === SECTION: story_frame === 吗？=== SECTION: volume_map === 吗？=== SECTION: roles === 吗？=== SECTION: book_rules === 吗？=== SECTION: pending_hooks === 吗？缺哪个现在补。**
+
+### roles 段格式（严格遵循）：
+一人一卡 prose，用以下格式分隔：
+---ROLE---
+tier: major  （或 minor）
+name: <角色名>
+---CONTENT---
+## 核心标签
+（3-5 个关键词）
+
+## 反差细节
+（1-2 个矛盾性细节）
+
+## 人物小传（过往经历）
+
+## 当前现状（第N章状态）
+
+## 关系网络
+
+## 内在驱动
+
+## 成长弧光
+---ROLE---
+tier: minor
+name: <角色名>
+---CONTENT---
+...（次要角色可以简略）
+
 所有 prose 必须从资料包中推导，不得臆造。若资料包声明为压缩包，把章节目录和正文摘录当作基础设定证据；完整章节会在后续回放阶段逐章进入 truth files。volume_map 中，已有章节作为"回顾段"（一段散文），续写部分写到章级 prose。伏笔识别以资料包提供的证据为准，尽量完整。`;
 
     // Truncate chaptersText if it exceeds the context window.
@@ -1074,7 +1275,7 @@ ${continuationDirective}
     // Use only 70% of context window to leave headroom for KV cache and prompt processing.
     const contextWindow = this.ctx.client._piModel?.contextWindow ?? 128_000;
     const usableContext = Math.floor(contextWindow * 0.7);
-    const reservedForSystemAndOutput = (systemPrompt.length / 1.5) + 20480 + 4096; // system + output + safety margin
+    const reservedForSystemAndOutput = (systemPrompt.length / 1.5) + 87381 + 4096; // system + output (131072 tokens ≈ 87381 chars at 1.5 chars/token) + safety margin
     const maxUserChars = Math.floor((usableContext - reservedForSystemAndOutput) * 1.5);
     let truncated = false;
     let safeText = chaptersText;
@@ -1102,11 +1303,14 @@ ${continuationDirective}
       : `以下是《${book.title}》的已有正文资料包，请从中反向推导完整基础设定：\n\n${safeText}${truncationNote}`;
 
     const maxParseRetries = 2;
+    const importMaxTokens = 131072;
     for (let attempt = 0; attempt <= maxParseRetries; attempt++) {
+      this.log?.debug(`[architect] generateFoundationFromImport: LLM call attempt ${attempt + 1}/${maxParseRetries + 1}, maxTokens=${importMaxTokens}, temperature=0.5`);
       const response = await this.chat([
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
-      ], { maxTokens: 20480, temperature: 0.5 });
+      ], { maxTokens: importMaxTokens, temperature: 0.5 });
+      this.log?.debug(`[architect] generateFoundationFromImport: LLM response received, ${response.content.length} chars`);
 
       try {
         return this.parseSections(response.content, resolvedLanguage);
@@ -1115,10 +1319,12 @@ ${continuationDirective}
         const isMissingSections = msg.includes("missing required section");
         if (isMissingSections && attempt < maxParseRetries) {
           this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): ${msg} — retrying with feedback`);
-          // Append feedback about missing sections to the user message for the retry
+          // Append feedback about missing sections to the user message for the retry.
+          // Include budget reminder so the LLM compresses over-long sections
+          // instead of just being told to "keep going".
           const retryFeedback = resolvedLanguage === "en"
-            ? `\n\n[IMPORTANT — your previous output was missing required sections. You MUST produce ALL 5 sections: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===. Do not stop until all 5 are complete.]`
-            : `\n\n[重要——你上次的输出缺少必要 section。必须输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。不要在完成前停止。]`;
+            ? `\n\n[CRITICAL — your previous output was INCOMPLETE. It was missing required sections because earlier sections (especially volume_map) exceeded their char budgets and consumed all output tokens. You MUST:\n1. STRICTLY obey the HARD BUDGET: story_frame ≤ 3000, volume_map ≤ 4000, roles ≤ 8000, book_rules ≤ 500, pending_hooks ≤ 2000.\n2. Produce ALL 5 sections in order: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===.\n3. If volume_map feels too long, COMPRESS it — merge volumes, shorten paragraphs. Do NOT let any section exceed its budget.\n4. Output is only complete after the last row of pending_hooks.]`
+            : `\n\n[严重——你上次的输出不完整。缺少必要 section 的原因是前面的 section（尤其是 volume_map）超出了字符预算，耗尽了输出 token。你必须：\n1. 严格遵守硬预算：story_frame ≤ 3000、volume_map ≤ 5000、roles ≤ 8000、book_rules ≤ 500、pending_hooks ≤ 2000。\n2. 按顺序输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。\n3. 如果 volume_map 太长，必须压缩——合并卷、缩短段落。任何 section 不得超过预算。\n4. 输出只有在 pending_hooks 最后一行写完后才算完成。]`;
           userMessage += retryFeedback;
           continue;
         }
@@ -1137,7 +1343,9 @@ ${continuationDirective}
   ): Promise<ArchitectOutput> {
     const { profile: gp, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
-    const reviewFeedbackBlock = this.buildReviewFeedbackBlock(reviewFeedback, book.language ?? "zh");
+    const resolvedLanguage = book.language ?? "zh";
+    this.log?.debug(`[architect] generateFanficFoundation: genre=${book.genre}, language=${resolvedLanguage}, fanficMode=${fanficMode}, canon=${fanficCanon.length} chars`);
+    const reviewFeedbackBlock = this.buildReviewFeedbackBlock(reviewFeedback, resolvedLanguage);
 
     const MODE_INSTRUCTIONS: Record<FanficMode, string> = {
       canon: "剧情发生在原作空白期或未详述的角度。不可改变原作已确立的事实。",
@@ -1175,15 +1383,17 @@ ${genreBody}
 - 主角弧线只写在 roles/主要角色/<主角>.md，不在 story_frame 重复
 - 所有 outline 必须是散文密度`;
 
+    this.log?.debug(`[architect] generateFanficFoundation: LLM call, temperature=0.7`);
     const response = await this.chat([
       { role: "system", content: systemPrompt },
       {
         role: "user",
         content: `请为标题为"${book.title}"的${fanficMode}模式同人小说生成基础设定。目标${book.targetChapters}章，每章${book.chapterWordCount}字。`,
       },
-    ], { temperature: 0.7 });
+    ], { maxTokens: 131072, temperature: 0.7 });
+    this.log?.debug(`[architect] generateFanficFoundation: LLM response received, ${response.content.length} chars`);
 
-    return this.parseSections(response.content, book.language ?? "zh");
+    return this.parseSections(response.content, resolvedLanguage);
   }
 
   // -------------------------------------------------------------------------

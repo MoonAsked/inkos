@@ -90,9 +90,9 @@ describe("providers structural integrity", () => {
     expect(getEndpoint("minimax")?.baseUrl).toContain("/anthropic");
   });
 
-  it("B2：中国原厂批次 2 全部收录（6 个）", () => {
+  it("B2：中国原厂批次 2 全部收录（7 个）", () => {
     const ids = getAllEndpoints().map((p) => p.id);
-    for (const id of ["spark", "sensenova", "tencentcloud", "xiaomimimo", "longcat", "internlm"]) {
+    for (const id of ["spark", "sensenova", "sensenova_2", "tencentcloud", "xiaomimimo", "longcat", "internlm"]) {
       expect(ids).toContain(id);
     }
   });
@@ -117,9 +117,9 @@ describe("providers structural integrity", () => {
     expect(getEndpoint("newapi")?.baseUrl).toBe("");
   });
 
-  it("B4：总 provider 数 = 35（不含 CodingPlan 分组，R5 删 qwen / higress 后 + nvidia）", () => {
+  it("B4：总 provider 数 = 36（不含 CodingPlan 分组，R5 删 qwen / higress 后 + nvidia + sensenova_2）", () => {
     const nonCoding = getAllEndpoints().filter((p) => p.group !== "codingPlan");
-    expect(nonCoding.length).toBe(35);
+    expect(nonCoding.length).toBe(36);
   });
 
   it("B6：CodingPlan 8 个 provider 全部收录", () => {
@@ -133,8 +133,8 @@ describe("providers structural integrity", () => {
     }
   });
 
-  it("B6：总 provider 数 = 43 (35 base + 8 CodingPlan)", () => {
-    expect(getAllEndpoints().length).toBe(43);
+  it("B6：总 provider 数 = 44 (36 base + 8 CodingPlan)", () => {
+    expect(getAllEndpoints().length).toBe(44);
   });
 
   it("B6：CodingPlan provider 都走 anthropic-messages", () => {

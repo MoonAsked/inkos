@@ -864,6 +864,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           totalChars: progress.totalChars,
           chineseChars: progress.chineseChars,
           thinkingChars: progress.thinkingChars,
+          currentSection: progress.currentSection,
         });
       },
       externalContext: overrides?.externalContext,

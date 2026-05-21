@@ -13,7 +13,7 @@ export const VOLCENGINE: InkosEndpoint = {
   group: "china",
   api: "openai-completions",
   baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-  checkModel: "doubao-seed-2.0-lite",
+  checkModel: "doubao-lite-32k",
   temperatureRange: [0, 2],
   defaultTemperature: 0.7,
   writingTemperature: 1,

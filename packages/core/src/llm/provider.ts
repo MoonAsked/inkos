@@ -30,6 +30,10 @@ export interface StreamProgress {
   readonly thinkingChars: number;
   readonly status: "streaming" | "done";
   readonly label?: string;
+  /** Last N chars of generated content (for debug logging). */
+  readonly recentText?: string;
+  /** Name of the SECTION currently being generated (e.g. "story_frame"), if detectable. */
+  readonly currentSection?: string;
 }
 
 export type OnStreamProgress = (progress: StreamProgress) => void;
@@ -39,6 +43,19 @@ const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
 const TRANSIENT_LLM_RETRIES = 2;
 const RATE_LIMIT_RETRIES = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 5_000;
+
+/** Provider-level log: prefer structured logger, fall back to console.warn. */
+function providerWarn(logger: import("../utils/logger.js").Logger | undefined, message: string): void {
+  if (logger) {
+    logger.warn(message);
+  } else {
+    console.warn(`[inkos] ${message}`);
+  }
+}
+
+function providerDebug(logger: import("../utils/logger.js").Logger | undefined, message: string): void {
+  logger?.debug(message);
+}
 
 function mergeUserAgent(headers?: Record<string, string>): Record<string, string> {
   return { "User-Agent": INKOS_USER_AGENT, ...(headers ?? {}) };
@@ -54,6 +71,31 @@ export function createStreamMonitor(
   const startTime = Date.now();
   let timer: ReturnType<typeof setInterval> | undefined;
 
+  // Content buffer for debug logging: keep a sliding window of recent text
+  const RECENT_WINDOW = 500;
+  let recentText = "";
+
+  // Section tracking: detect === SECTION: name === markers
+  const SECTION_PATTERN = /===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===/gi;
+  let currentSection: string | undefined;
+  let lastSectionScanPos = 0;
+
+  function scanForSections(text: string): void {
+    // Only scan newly added content since last scan
+    const scanFrom = Math.max(0, lastSectionScanPos - 30); // overlap for safety
+    const newText = text.slice(scanFrom);
+    SECTION_PATTERN.lastIndex = 0;
+    let lastMatch: RegExpExecArray | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = SECTION_PATTERN.exec(newText)) !== null) {
+      lastMatch = m;
+    }
+    if (lastMatch) {
+      currentSection = lastMatch[1]?.trim();
+    }
+    lastSectionScanPos = text.length;
+  }
+
   if (onProgress) {
     timer = setInterval(() => {
       onProgress({
@@ -62,6 +104,8 @@ export function createStreamMonitor(
         chineseChars,
         thinkingChars,
         status: "streaming",
+        recentText,
+        currentSection,
       });
     }, intervalMs);
   }
@@ -70,6 +114,10 @@ export function createStreamMonitor(
     onChunk(text: string): void {
       totalChars += text.length;
       chineseChars += (text.match(/[\u4e00-\u9fff]/g) || []).length;
+      // Maintain sliding window of recent text
+      recentText = (recentText + text).slice(-RECENT_WINDOW);
+      // Scan for section markers
+      scanForSections(recentText);
     },
     onThinkingChunk(text: string): void {
       thinkingChars += text.length;
@@ -85,6 +133,8 @@ export function createStreamMonitor(
         chineseChars,
         thinkingChars,
         status: "done",
+        recentText,
+        currentSection,
       });
     },
   };
@@ -115,6 +165,7 @@ export interface LLMClient {
   readonly proxyUrl?: string;
   readonly _piModel?: PiModel<PiApi>;
   readonly _apiKey?: string;
+  readonly _logger?: import("../utils/logger.js").Logger;
   readonly defaults: {
     readonly temperature: number;
     /**
@@ -160,7 +211,7 @@ export interface ChatWithToolsResult {
 
 // === Factory ===
 
-export function createLLMClient(config: LLMConfig): LLMClient {
+export function createLLMClient(config: LLMConfig, logger?: import("../utils/logger.js").Logger): LLMClient {
   // C1 (v2.0.0)：config.maxTokens / maxTokensCap 已删除；defaults.maxTokens 完全从 modelCard 推导。
   const _earlyCard = lookupModel(config.service ?? "custom", config.model);
   const defaults = {
@@ -225,6 +276,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     proxyUrl: config.proxyUrl,
     _piModel: piModel,
     _apiKey: config.apiKey,
+    _logger: logger,
     defaults,
   };
 }
@@ -1345,14 +1397,24 @@ export async function chatCompletion(
     readonly onTextDelta?: (text: string) => void;
   },
 ): Promise<LLMResponse> {
-  // C1 (v2.0.0)：删除 maxTokensCap 机制。per-call 显式传的 maxTokens 永远不被裁剪。
+  const rawMaxTokens = options?.maxTokens ?? client.defaults.maxTokens;
+  // Clamp per-call maxTokens to the model's actual maxOutput to avoid 400 errors
+  // from providers that reject max_tokens exceeding their model limit.
+  const modelMaxOutput = client._piModel?.maxTokens;
+  const clampedMaxTokens = modelMaxOutput && rawMaxTokens > modelMaxOutput
+    ? modelMaxOutput
+    : rawMaxTokens;
+  if (clampedMaxTokens !== rawMaxTokens) {
+    providerDebug(client._logger, `chatCompletion: maxTokens clamped ${rawMaxTokens} → ${clampedMaxTokens} (model maxOutput=${modelMaxOutput})`);
+  }
+  providerDebug(client._logger, `chatCompletion: model=${model}, temperature=${options?.temperature ?? client.defaults.temperature}, maxTokens=${clampedMaxTokens}, messages=${messages.length}, stream=${client.stream}`);
   const resolved = {
     temperature: clampTemperatureForModel(
       client.service,
       model,
       options?.temperature ?? client.defaults.temperature,
     ),
-    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+    maxTokens: clampedMaxTokens,
     extra: client.defaults.extra,
   };
   const onStreamProgress = options?.onStreamProgress;
@@ -1372,7 +1434,7 @@ export async function chatCompletion(
         { enabled: !onTextDelta },
       ),
       (attempt, delayMs) => {
-        console.warn(`[inkos] Rate limited (429) — attempt ${attempt}/${RATE_LIMIT_RETRIES}, waiting ${Math.round(delayMs / 1000)}s before retry...`);
+        providerWarn(client._logger, `Rate limited (429) — attempt ${attempt}/${RATE_LIMIT_RETRIES}, waiting ${Math.round(delayMs / 1000)}s before retry...`);
       },
     );
   } catch (error) {
@@ -1399,6 +1461,15 @@ export async function chatWithTools(
     readonly maxTokens?: number;
   },
 ): Promise<ChatWithToolsResult> {
+  const rawMaxTokens = options?.maxTokens ?? client.defaults.maxTokens;
+  const modelMaxOutput = client._piModel?.maxTokens;
+  const clampedMaxTokens = modelMaxOutput && rawMaxTokens > modelMaxOutput
+    ? modelMaxOutput
+    : rawMaxTokens;
+  if (clampedMaxTokens !== rawMaxTokens) {
+    providerDebug(client._logger, `chatWithTools: maxTokens clamped ${rawMaxTokens} → ${clampedMaxTokens} (model maxOutput=${modelMaxOutput})`);
+  }
+  providerDebug(client._logger, `chatWithTools: model=${model}, temperature=${options?.temperature ?? client.defaults.temperature}, maxTokens=${clampedMaxTokens}, messages=${messages.length}, tools=${tools.length}`);
   try {
     const resolved = {
       temperature: clampTemperatureForModel(
@@ -1406,7 +1477,7 @@ export async function chatWithTools(
         model,
         options?.temperature ?? client.defaults.temperature,
       ),
-      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+      maxTokens: clampedMaxTokens,
     };
     return await chatWithToolsViaPiAi(client, model, messages, tools, resolved);
   } catch (error) {

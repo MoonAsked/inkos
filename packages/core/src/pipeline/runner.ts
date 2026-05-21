@@ -5,7 +5,7 @@ import type { BookConfig, FanficMode } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import type { NotifyChannel, LLMConfig, AgentLLMOverride, InputGovernanceMode } from "../models/project.js";
 import type { GenreProfile } from "../models/genre-profile.js";
-import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
+import { ArchitectAgent, type ArchitectOutput, type ArchitectRole } from "../agents/architect.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { composeGovernedChapter, type ComposeChapterOutput } from "../agents/composer.js";
@@ -18,6 +18,7 @@ import { StateValidatorAgent, type ValidationResult, type ValidationWarning } fr
 import { RadarAgent } from "../agents/radar.js";
 import type { RadarSource } from "../agents/radar-source.js";
 import { readGenreProfile } from "../agents/rules-reader.js";
+import { sanitizeRoleFileName, canonicalRoleName } from "../utils/outline-paths.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
 import { StateManager } from "../state/manager.js";
@@ -35,6 +36,8 @@ import { buildWritingMethodologySection } from "../utils/writing-methodology.js"
 import {
   isNewLayoutBook,
   readCharacterContext,
+  readRhythmPrinciples,
+  readRoleCards,
   readStoryFrame,
   readVolumeMap,
 } from "../utils/outline-paths.js";
@@ -323,6 +326,13 @@ export interface ImportChaptersInput {
   /** "continuation" (default) = pick up where the text left off, no new spacetime.
    *  "series" = shared universe but independent new story, requires new spacetime. */
   readonly importMode?: "continuation" | "series";
+  /**
+   * Regenerate foundation (story_frame, roles, book_rules, etc.) every N chapters
+   * during the import step 2 replay. 0 = never (step 1 only). Default: 0.
+   * For super-long novels (1000+ chapters), set to 1 to update foundation after
+   * every chapter, ensuring characters introduced later appear in roles/.
+   */
+  readonly foundationInterval?: number;
 }
 
 export interface ImportChaptersResult {
@@ -395,6 +405,10 @@ export class PipelineRunner {
     this.config.logger?.warn(this.localize(language, message));
   }
 
+  private logDebug(message: string): void {
+    this.config.logger?.debug(message);
+  }
+
   private async tryGenerateStyleGuide(
     bookId: string,
     referenceText: string,
@@ -424,6 +438,7 @@ export class PipelineRunner {
     readonly maxRetries?: number;
   }): Promise<ArchitectOutput> {
     const maxRetries = params.maxRetries ?? this.config.foundationReviewRetries ?? 2;
+    this.logDebug(`[pipeline] generateAndReviewFoundation: mode=${params.mode}, language=${params.language}, maxRetries=${maxRetries}`);
     let foundation = await params.generate();
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -563,7 +578,7 @@ export class PipelineRunner {
         thinkingBudget: base?.thinkingBudget ?? 0,
         apiFormat,
         stream,
-      });
+      }, this.config.logger?.child("llm"));
       this.agentClients.set(cacheKey, client);
     }
     return { model: override.model, client };
@@ -605,6 +620,7 @@ export class PipelineRunner {
   }
 
   async initBook(book: BookConfig, options: InitBookOptions = {}): Promise<void> {
+    this.logDebug(`[pipeline] initBook: bookId=${book.id}, genre=${book.genre}, title="${book.title}"`);
     const architect = new ArchitectAgent(this.agentCtxFor("architect", book.id));
     const bookDir = this.state.bookDir(book.id);
     const stagingBookDir = join(
@@ -1518,6 +1534,7 @@ export class PipelineRunner {
           ruleStack: writeInput.ruleStack,
         }
       : undefined;
+    this.logDebug(`[pipeline] _writeNextChapter: chapter=${chapterNumber}, inputGovernance=${reducedControlInput ? "v2" : "legacy"}, wordCount=${wordCount ?? book.chapterWordCount}`);
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
     const lengthSpec = buildLengthSpec(
@@ -1545,6 +1562,7 @@ export class PipelineRunner {
       ...(temperatureOverride ? { temperatureOverride } : {}),
     });
     const writerCount = countChapterLength(output.content, lengthSpec.countingMode);
+    this.logDebug(`[pipeline] writer output: ${writerCount} ${lengthSpec.countingMode}, content=${output.content.length} chars`);
 
     // Token usage accumulator
     let totalUsage: TokenUsageSummary = output.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -1599,6 +1617,7 @@ export class PipelineRunner {
     let auditResult = reviewResult.auditResult;
     const postReviseCount = reviewResult.postReviseCount;
     const normalizeApplied = reviewResult.normalizeApplied;
+    this.logDebug(`[pipeline] review cycle: revised=${revised}, auditPassed=${auditResult.passed}, finalWordCount=${finalWordCount}, postReviseCount=${postReviseCount}, normalizeApplied=${normalizeApplied}`);
 
     // 3b. File-layer polish pass — runs AFTER structural audit accepts the
     // chapter. Polisher only touches sentence craft / paragraph shape /
@@ -1607,6 +1626,7 @@ export class PipelineRunner {
     // chapter (leave the failing draft visible for the next cycle) or when
     // length is dangerously off-range (normalize should handle it, not polish).
     if (auditResult.passed) {
+      this.logDebug(`[pipeline] audit passed, proceeding to polish pass`);
       try {
         const { PolisherAgent } = await import("../agents/polisher.js");
         const polisher = new PolisherAgent(this.agentCtxFor("polisher", bookId));
@@ -2506,10 +2526,14 @@ ${matrix}`,
 
       const log = this.config.logger?.child("import");
 
-      // Step 1: Generate foundation on first run (not on resume)
-      // Skip if foundation already exists (e.g. previous import was interrupted after step 1)
+      // Step 1: Generate foundation on first run (not on resume).
+      // If foundation was created by `book create` (directory complete but no
+      // chapters imported yet), regenerate it from the actual chapter content.
       const foundationAlreadyExists = startFrom === 1 && await this.state.isCompleteBookDirectory(bookDir);
-      if (startFrom === 1 && !foundationAlreadyExists) {
+      const hasExistingImportChapters = (await this.state.loadChapterIndex(input.bookId)).length > 0;
+      const foundationFromBookCreate = foundationAlreadyExists && !hasExistingImportChapters && startFrom === 1;
+      const needsFoundation = startFrom === 1 && (!foundationAlreadyExists || foundationFromBookCreate);
+      if (needsFoundation) {
         log?.info(this.localize(resolvedLanguage, {
           zh: `步骤 1：从 ${input.chapters.length} 章生成基础设定...`,
           en: `Step 1: Generating foundation from ${input.chapters.length} chapters...`,
@@ -2587,6 +2611,7 @@ ${matrix}`,
           foundation,
           gp.numericalSystem,
           resolvedLanguage,
+          foundationFromBookCreate ? "revise" : "init",
         );
         await this.resetImportReplayTruthFiles(bookDir, resolvedLanguage);
         await this.state.saveChapterIndex(input.bookId, []);
@@ -2607,7 +2632,7 @@ ${matrix}`,
         }));
       }
 
-      if (foundationAlreadyExists) {
+      if (foundationAlreadyExists && !foundationFromBookCreate) {
         log?.info(this.localize(resolvedLanguage, {
           zh: "步骤 1 已跳过：基础设定已存在，直接进入章节回放。",
           en: "Step 1 skipped: foundation already exists, proceeding to chapter replay.",
@@ -2721,6 +2746,19 @@ ${matrix}`,
 
         importedCount++;
         totalWords += chapterWordCount;
+
+        // Per-chapter foundation merge: combine the current chapter with all
+        // existing foundation files (story_frame, volume_map, book_rules, roles,
+        // rhythm_principles) via the architect. Existing content is preserved
+        // and augmented; runtime files are not touched.
+        const fi = input.foundationInterval ?? 0;
+        if (fi > 0 && (chapterNumber % fi === 0 || i === input.chapters.length - 1)) {
+          await this.mergeChapterIntoFoundation(
+            input.bookId, book, bookDir, ch, chapterNumber,
+            gp.numericalSystem, resolvedLanguage,
+            input.importMode === "series" ? "series" : undefined,
+          );
+        }
       }
 
       if (input.chapters.length > 0) {
@@ -2924,6 +2962,202 @@ ${matrix}`,
       "| --- | --- | --- | --- | --- | --- | --- |",
       "",
     ].join("\n");
+  }
+
+  /**
+   * Merge a single chapter's content into ALL existing foundation files
+   * (story_frame, volume_map, book_rules, roles, rhythm_principles).
+   * Reads the current foundation from disk, passes it together with the
+   * chapter to the architect, and overwrites each section with the merged
+   * result. Runtime files (current_state, pending_hooks, emotional_arcs)
+   * are NOT touched — they are maintained by the step 2 analysis.
+   */
+  private async mergeChapterIntoFoundation(
+    bookId: string,
+    book: BookConfig,
+    bookDir: string,
+    chapter: { readonly title: string; readonly content: string },
+    chapterNumber: number,
+    _numericalSystem: boolean,
+    language: LengthLanguage,
+    importMode?: "continuation" | "series",
+  ): Promise<void> {
+    const chapterText = language === "en"
+      ? `Chapter ${chapterNumber}: ${chapter.title}\n\n${chapter.content}`
+      : `第${chapterNumber}章 ${chapter.title}\n\n${chapter.content}`;
+    if (chapterText.length < 50) return;
+
+    const log = this.config.logger?.child("import");
+    log?.info(this.localize(language, {
+      zh: `合并章节 ${chapterNumber} 到基础设定...`,
+      en: `Merging chapter ${chapterNumber} into foundation...`,
+    }));
+
+    // Read ALL existing foundation files to pass as merge context.
+    const placeholder = language === "en"
+      ? "(not yet established)"
+      : "（尚未建立）";
+    const [storyFrame, volumeMap, existingRoles, rhythmPrinciples] =
+      await Promise.all([
+        readStoryFrame(bookDir, placeholder),
+        readVolumeMap(bookDir, placeholder),
+        readRoleCards(bookDir),
+        readRhythmPrinciples(bookDir),
+      ]);
+    const bookRulesPath = join(bookDir, "story", "book_rules.md");
+    const bookRulesRaw = await readFile(bookRulesPath, "utf-8").catch(() => "");
+
+    // Build a single external-context block with all existing foundation.
+    const existingFoundationParts: string[] = [];
+    if (language === "en") {
+      if (storyFrame && storyFrame !== placeholder) existingFoundationParts.push(`## Existing Story Frame\n${storyFrame}`);
+      if (volumeMap && volumeMap !== placeholder) existingFoundationParts.push(`## Existing Volume Map\n${volumeMap}`);
+      if (bookRulesRaw.trim()) existingFoundationParts.push(`## Existing Book Rules\n${bookRulesRaw}`);
+      if (rhythmPrinciples.trim()) existingFoundationParts.push(`## Existing Rhythm Principles\n${rhythmPrinciples}`);
+      if (existingRoles.length > 0) {
+        existingFoundationParts.push("## Existing Character Profiles\n"
+          + existingRoles.map(r => `### ${r.name}\n${r.content}`).join("\n\n"));
+      }
+    } else {
+      if (storyFrame && storyFrame !== placeholder) existingFoundationParts.push(`## 已有故事框架\n${storyFrame}`);
+      if (volumeMap && volumeMap !== placeholder) existingFoundationParts.push(`## 已有卷纲\n${volumeMap}`);
+      if (bookRulesRaw.trim()) existingFoundationParts.push(`## 已有书籍规则\n${bookRulesRaw}`);
+      if (rhythmPrinciples.trim()) existingFoundationParts.push(`## 已有节奏原则\n${rhythmPrinciples}`);
+      if (existingRoles.length > 0) {
+        existingFoundationParts.push("## 已有角色档案\n"
+          + existingRoles.map(r => `### ${r.name}\n${r.content}`).join("\n\n"));
+      }
+    }
+    const existingFoundationText = existingFoundationParts.length > 0
+      ? (language === "en"
+          ? `Below are the CURRENT foundation files. UPDATE them with any new information revealed in the chapter. Keep everything that is still correct — only add, amend, or remove content when the chapter justifies it.\n\nIMPORTANT: You MUST output using === SECTION: === format: story_frame, volume_map, roles, book_rules, pending_hooks. Do NOT use legacy story_bible/volume_outline format.\n\n${existingFoundationParts.join("\n\n")}`
+          : `以下是当前的基础设定文件。根据下方章节内容更新它们，保留一切仍然正确的信息，只对章节中新揭示的内容进行增补或修正。\n\n重要：你必须使用 === SECTION: === 五段式格式输出：story_frame、volume_map、roles、book_rules、pending_hooks。不要使用旧版 story_bible/volume_outline 格式。\n\n${existingFoundationParts.join("\n\n")}`)
+      : "";
+
+    const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
+    const foundation = await architect.generateFoundationFromImport(
+      book, chapterText,
+      existingFoundationText, // externalContext: full foundation for merge
+      undefined,
+      { importMode },
+    );
+
+    // Write merged foundation files. Skip runtime files (pending_hooks,
+    // current_state) — they are maintained by the step 2 analysis.
+    const storyDir = join(bookDir, "story");
+    const outlineDir = join(storyDir, "outline");
+    const rolesDir = join(storyDir, "roles");
+    const majorDir = join(rolesDir, "主要角色");
+    const minorDir = join(rolesDir, "次要角色");
+
+    const writes: Array<Promise<void>> = [];
+
+    // story_frame
+    const frameContent = foundation.storyFrame ?? foundation.storyBible;
+    if (frameContent?.trim()) {
+      await mkdir(outlineDir, { recursive: true });
+      writes.push(writeFile(join(outlineDir, "story_frame.md"), frameContent, "utf-8"));
+    }
+
+    // volume_map
+    const vmapContent = foundation.volumeMap ?? foundation.volumeOutline;
+    if (vmapContent?.trim()) {
+      await mkdir(outlineDir, { recursive: true });
+      writes.push(writeFile(join(outlineDir, "volume_map.md"), vmapContent, "utf-8"));
+    }
+
+    // book_rules
+    if (foundation.bookRules?.trim()) {
+      writes.push(writeFile(join(storyDir, "book_rules.md"), foundation.bookRules, "utf-8"));
+    }
+
+    // roles — only overwrite when the architect actually returned roles;
+    // if empty (model didn't produce ---ROLE--- blocks), keep existing files.
+    // Cross-tier dedup: same canonical name → major wins; remove stale opposite-tier file.
+    // Name matching: reuse existing file name on disk to avoid duplicates like _杨洛_.md vs 杨洛.md.
+    if (foundation.roles && foundation.roles.length > 0) {
+      await mkdir(majorDir, { recursive: true });
+      await mkdir(minorDir, { recursive: true });
+
+      // Dedup within new roles — major wins over minor
+      const dedupedRoles: ArchitectRole[] = [];
+      const seenCanon = new Map<string, "major" | "minor">();
+      for (const role of foundation.roles) {
+        const canon = canonicalRoleName(role.name);
+        if (!canon) continue;
+        const prev = seenCanon.get(canon);
+        if (prev === undefined) {
+          seenCanon.set(canon, role.tier);
+          dedupedRoles.push(role);
+        } else if (prev === "minor" && role.tier === "major") {
+          seenCanon.set(canon, "major");
+          const idx = dedupedRoles.findIndex(
+            (r) => canonicalRoleName(r.name) === canon,
+          );
+          if (idx >= 0) dedupedRoles[idx] = role;
+        }
+      }
+
+      // Scan existing files to build canonical→fileName map
+      const existingFiles = new Map<string, string>();
+      const scanDir = async (dir: string) => {
+        let entries: string[];
+        try { entries = await readdir(dir); } catch { return; }
+        for (const entry of entries) {
+          if (!entry.endsWith(".md")) continue;
+          const baseName = entry.replace(/\.md$/, "");
+          const canon = canonicalRoleName(baseName);
+          if (canon && !existingFiles.has(canon)) {
+            existingFiles.set(canon, baseName);
+          }
+        }
+      };
+      await Promise.all([scanDir(majorDir), scanDir(minorDir)]);
+
+      // Write deduped roles and remove stale opposite-tier files
+      const roleDeletions: Array<Promise<void>> = [];
+      for (const role of dedupedRoles) {
+        const canon = canonicalRoleName(role.name);
+        if (!canon) continue;
+        const targetDir = role.tier === "major" ? majorDir : minorDir;
+        const oppositeDir = role.tier === "major" ? minorDir : majorDir;
+
+        const existing = existingFiles.get(canon);
+        const safeName = existing
+          ? existing
+          : sanitizeRoleFileName(role.name);
+        if (!safeName) continue;
+
+        writes.push(writeFile(join(targetDir, `${safeName}.md`), role.content, "utf-8"));
+
+        // Remove stale file from opposite tier
+        let oppositeEntries: string[];
+        try { oppositeEntries = await readdir(oppositeDir); } catch { continue; }
+        for (const entry of oppositeEntries) {
+          if (!entry.endsWith(".md")) continue;
+          const entryCanon = canonicalRoleName(entry.replace(/\.md$/, ""));
+          if (entryCanon === canon) {
+            roleDeletions.push(rm(join(oppositeDir, entry), { force: true }));
+          }
+        }
+      }
+      await Promise.all(roleDeletions);
+    }
+
+    // rhythm_principles (not produced by all models — write when present)
+    if (foundation.rhythmPrinciples?.trim()) {
+      const rhythmName = language === "en" ? "rhythm_principles.md" : "节奏原则.md";
+      writes.push(writeFile(join(outlineDir, rhythmName), foundation.rhythmPrinciples, "utf-8"));
+    }
+
+    await Promise.all(writes);
+    const roleCount = foundation.roles?.length ?? 0;
+    const frameLen = frameContent?.length ?? 0;
+    const vmapLen = vmapContent?.length ?? 0;
+    log?.info(this.localize(language, {
+      zh: `基础设定已合并（story_frame=${frameLen}ch, volume_map=${vmapLen}ch, roles=${roleCount}个）`,
+      en: `Foundation merged (story_frame=${frameLen}ch, volume_map=${vmapLen}ch, roles=${roleCount})`,
+    }));
   }
 
   private async normalizeDraftLengthIfNeeded(params: {

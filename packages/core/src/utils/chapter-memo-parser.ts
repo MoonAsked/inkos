@@ -110,9 +110,9 @@ export function parseMemo(
   if (typeof f.goal !== "string" || f.goal.length === 0) {
     throw new PlannerParseError("goal must be a non-empty string");
   }
-  if (f.goal.length > 80) {
+  if (f.goal.length > 50) {
     throw new PlannerParseError(
-      `goal too long: ${f.goal.length} chars (max 80)`,
+      `goal too long: ${f.goal.length} chars (max 50)`,
     );
   }
 

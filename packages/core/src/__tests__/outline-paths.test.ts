@@ -8,6 +8,8 @@ import {
   readRoleCards,
   readStoryFrame,
   readVolumeMap,
+  sanitizeRoleFileName,
+  canonicalRoleName,
 } from "../utils/outline-paths.js";
 
 let bookDir: string;
@@ -93,5 +95,50 @@ describe("outline-paths", () => {
 
     const content = await readRhythmPrinciples(bookDir);
     expect(content).toBe("六条原则");
+  });
+});
+
+describe("sanitizeRoleFileName", () => {
+  it("passes through clean names unchanged", () => {
+    expect(sanitizeRoleFileName("杨洛")).toBe("杨洛");
+    expect(sanitizeRoleFileName("贝音瑶")).toBe("贝音瑶");
+  });
+
+  it("strips leading/trailing underscores from Markdown bold markers", () => {
+    expect(sanitizeRoleFileName("*杨洛*")).toBe("杨洛");
+    expect(sanitizeRoleFileName("_贝音瑶_")).toBe("贝音瑶");
+  });
+
+  it("collapses consecutive underscores", () => {
+    expect(sanitizeRoleFileName("a__b")).toBe("a_b");
+  });
+
+  it("replaces filesystem-illegal characters and cleans up", () => {
+    expect(sanitizeRoleFileName('"出租车司机"')).toBe("出租车司机");
+    // 《》 are not filesystem-illegal, so sanitizeRoleFileName keeps them;
+    // canonicalRoleName is responsible for stripping them (tested below).
+    expect(sanitizeRoleFileName("《张三》")).toBe("《张三》");
+  });
+
+  it("handles mixed formatting markers", () => {
+    expect(sanitizeRoleFileName('**"杨洛"**')).toBe("杨洛");
+  });
+});
+
+describe("canonicalRoleName", () => {
+  it("strips Markdown formatting markers", () => {
+    expect(canonicalRoleName("*杨洛*")).toBe("杨洛");
+    expect(canonicalRoleName("_贝音瑶_")).toBe("贝音瑶");
+    expect(canonicalRoleName('"出租车司机"')).toBe("出租车司机");
+    expect(canonicalRoleName("《张三》")).toBe("张三");
+  });
+
+  it("passes through clean names unchanged", () => {
+    expect(canonicalRoleName("杨洛")).toBe("杨洛");
+    expect(canonicalRoleName("出租车司机")).toBe("出租车司机");
+  });
+
+  it("handles names with parentheses (valid in file names)", () => {
+    expect(canonicalRoleName("白衣女孩（机场遇险者）")).toBe("白衣女孩（机场遇险者）");
   });
 });
