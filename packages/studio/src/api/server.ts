@@ -852,6 +852,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           elapsedMs: progress.elapsedMs,
           totalChars: progress.totalChars,
           chineseChars: progress.chineseChars,
+          currentSection: progress.currentSection,
         });
       },
       externalContext: overrides?.externalContext,

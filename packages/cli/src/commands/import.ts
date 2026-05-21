@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { PipelineRunner, StateManager, splitChapters } from "@actalk/inkos-core";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat, mkdir } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadConfig, buildPipelineConfig, findProjectRoot, resolveBookId, log, logError } from "../utils.js";
 import {
@@ -65,6 +66,7 @@ importCommand
   .option("--split <regex>", "Custom regex for chapter splitting (single-file mode)")
   .option("--resume-from <n>", "Resume from chapter N (for interrupted imports)", parseInt)
   .option("--series", "Treat as a new series (shared universe, independent story) instead of direct continuation")
+  .option("--foundation-interval <n>", "Regenerate foundation every N chapters. 0 = never. Default: 1", parseInt)
   .option("--json", "Output JSON")
   .action(async (bookIdArg: string | undefined, opts) => {
     try {
@@ -82,6 +84,8 @@ importCommand
           `Use --resume-from <n> to append, or delete existing chapters first.`
         );
       }
+
+      const foundationInterval = opts.foundationInterval !== undefined ? opts.foundationInterval : 1;
 
       const fromPath = resolve(opts.from);
       const fromStat = await stat(fromPath);
@@ -126,13 +130,23 @@ importCommand
         }
       }
 
-      const pipeline = new PipelineRunner(buildPipelineConfig(config, root));
+      // Chapter import — always save pipeline logs to project root
+      const logDir = resolve(root, "logs");
+      await mkdir(logDir, { recursive: true });
+      const now = new Date();
+      const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+      const logPath = join(logDir, `import-${bookId}-${ts}.jsonl`);
+      log(`日志保存至: ${logPath}`);
+      const pipeline = new PipelineRunner(buildPipelineConfig(config, root, {
+        logFile: createWriteStream(logPath, { flags: "a" }),
+      }));
 
       const result = await pipeline.importChapters({
         bookId,
         chapters,
         resumeFrom: opts.resumeFrom,
         importMode: opts.series ? "series" : "continuation",
+        foundationInterval,
       });
 
       if (opts.json) {

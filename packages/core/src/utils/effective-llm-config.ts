@@ -48,6 +48,7 @@ interface ServiceConfigEntry {
   readonly baseUrl?: string;
   readonly temperature?: number;
   readonly maxTokens?: number;
+  readonly contextWindow?: number;
   readonly apiFormat?: "chat" | "responses";
   readonly stream?: boolean;
 }
@@ -313,6 +314,7 @@ function applyServiceEntry(llm: Record<string, unknown>, entry: ServiceConfigEnt
   llm.baseUrl = entry.baseUrl ?? resolveServicePreset(entry.service)?.baseUrl ?? "";
 
   if (entry.temperature !== undefined) llm.temperature = entry.temperature;
+  if (entry.contextWindow !== undefined) llm.contextWindow = entry.contextWindow;
   if (entry.apiFormat !== undefined) llm.apiFormat = entry.apiFormat;
   else if (transportDefaults?.apiFormat !== undefined) llm.apiFormat = transportDefaults.apiFormat;
   else llm.apiFormat = resolveServicePreset(entry.service)?.api.startsWith("openai-responses") ? "responses" : "chat";
@@ -358,6 +360,7 @@ function normalizeServiceEntries(raw: unknown): ServiceConfigEntry[] {
         ...(typeof entry.baseUrl === "string" && entry.baseUrl.length > 0 ? { baseUrl: entry.baseUrl } : {}),
         ...(typeof entry.temperature === "number" ? { temperature: entry.temperature } : {}),
         ...(typeof entry.maxTokens === "number" ? { maxTokens: entry.maxTokens } : {}),
+        ...(typeof entry.contextWindow === "number" ? { contextWindow: entry.contextWindow } : {}),
         ...(entry.apiFormat === "chat" || entry.apiFormat === "responses" ? { apiFormat: entry.apiFormat } : {}),
         ...(typeof entry.stream === "boolean" ? { stream: entry.stream } : {}),
       }));
@@ -380,6 +383,7 @@ function normalizeServiceEntryFromPatch(serviceId: string, value: Record<string,
       ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
       ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
       ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
+      ...(typeof value.contextWindow === "number" ? { contextWindow: value.contextWindow } : {}),
       ...(value.apiFormat === "chat" || value.apiFormat === "responses" ? { apiFormat: value.apiFormat } : {}),
       ...(typeof value.stream === "boolean" ? { stream: value.stream } : {}),
     };
@@ -392,6 +396,7 @@ function normalizeServiceEntryFromPatch(serviceId: string, value: Record<string,
       ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
       ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
       ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
+      ...(typeof value.contextWindow === "number" ? { contextWindow: value.contextWindow } : {}),
       ...(value.apiFormat === "chat" || value.apiFormat === "responses" ? { apiFormat: value.apiFormat } : {}),
       ...(typeof value.stream === "boolean" ? { stream: value.stream } : {}),
     };
@@ -401,6 +406,7 @@ function normalizeServiceEntryFromPatch(serviceId: string, value: Record<string,
     service: serviceId,
     ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
     ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
+    ...(typeof value.contextWindow === "number" ? { contextWindow: value.contextWindow } : {}),
     ...(value.apiFormat === "chat" || value.apiFormat === "responses" ? { apiFormat: value.apiFormat } : {}),
     ...(typeof value.stream === "boolean" ? { stream: value.stream } : {}),
   };
@@ -458,14 +464,13 @@ function assertModelBelongsToService(entry: ServiceConfigEntry | undefined, mode
 }
 
 function modelBelongsToService(service: string, model: string): boolean {
-  if (serviceAllowsUnlistedModels(service)) return true;
   const endpoint = getEndpoint(service);
   if (!endpoint) return true;
+  // Aggregator (OpenRouter, NewAPI, etc.) and local (Ollama, llama.cpp) providers
+  // have open model catalogs that cannot be exhaustively listed in the bank.
+  // Allow any model ID for these groups — the upstream API will reject invalid ones.
+  if (endpoint.group === "aggregator" || endpoint.group === "local") return true;
   return endpoint.models.some((knownModel) => knownModel.id.toLowerCase() === model.toLowerCase());
-}
-
-function serviceAllowsUnlistedModels(service: string): boolean {
-  return service === "ollama";
 }
 
 function serviceEntryKey(entry: ServiceConfigEntry): string {

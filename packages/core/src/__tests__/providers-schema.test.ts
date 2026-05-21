@@ -117,9 +117,9 @@ describe("providers structural integrity", () => {
     expect(getEndpoint("newapi")?.baseUrl).toBe("");
   });
 
-  it("B4：总 provider 数 = 34（不含 CodingPlan 分组，R5 删 qwen / higress 后）", () => {
+  it("B4：总 provider 数 = 36（不含 CodingPlan 分组，R5 删 qwen / higress 后 + nvidia + sensenova_2）", () => {
     const nonCoding = getAllEndpoints().filter((p) => p.group !== "codingPlan");
-    expect(nonCoding.length).toBe(34);
+    expect(nonCoding.length).toBe(36);
   });
 
   it("B6：CodingPlan 8 个 provider 全部收录", () => {
@@ -133,8 +133,8 @@ describe("providers structural integrity", () => {
     }
   });
 
-  it("B6：总 provider 数 = 42 (34 base + 8 CodingPlan)", () => {
-    expect(getAllEndpoints().length).toBe(42);
+  it("B6：总 provider 数 = 44 (36 base + 8 CodingPlan)", () => {
+    expect(getAllEndpoints().length).toBe(44);
   });
 
   it("B6：CodingPlan provider 都走 anthropic-messages", () => {

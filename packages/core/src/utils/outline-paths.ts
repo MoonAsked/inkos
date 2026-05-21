@@ -83,6 +83,34 @@ export interface RoleCard {
 }
 
 /**
+ * Sanitize a role name into a safe file name (without .md extension).
+ * 1. Replace filesystem-illegal characters with underscore.
+ * 2. Collapse consecutive underscores into one.
+ * 3. Trim leading/trailing underscores.
+ * 4. Trim whitespace.
+ *
+ * This ensures "杨洛", "*杨洛*", "_杨洛_" all map to "杨洛".
+ */
+export function sanitizeRoleFileName(name: string): string {
+  return name
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .trim();
+}
+
+/**
+ * Strip Markdown formatting markers (bold/italic/quotes) from a role name
+ * to get the canonical bare name for dedup matching.
+ * E.g. "*杨洛*" → "杨洛", "_贝音瑶_" → "贝音瑶", '"出租车司机"' → "出租车司机"
+ */
+export function canonicalRoleName(name: string): string {
+  return name
+    .replace(/[*_`"'"'《》【】]/g, "")
+    .trim();
+}
+
+/**
  * Read the roles/ directory. Returns [] when no roles are present (e.g. old
  * books still on character_matrix.md).
  */

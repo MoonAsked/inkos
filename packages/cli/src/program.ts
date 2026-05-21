@@ -95,10 +95,44 @@ export function createProgram(hooks: ProgramHooks = {}): Command {
   return program;
 }
 
+/**
+ * LLM override flags that are parsed manually by `parseLLMOverridesFromArgv`
+ * and must be stripped from argv before Commander sees them, otherwise
+ * sub-commands will reject them as unknown options.
+ */
+const LLM_OVERRIDE_FLAGS = new Set([
+  "--service", "--model", "--api-key-env", "--base-url", "--api-format",
+  "--stream", "--no-stream",
+]);
+
+/**
+ * Strip LLM global override flags (and their values) from argv so Commander
+ * sub-commands don't reject them.  `parseLLMOverridesFromArgv` still reads
+ * from the original `process.argv`, so the overrides remain functional.
+ */
+function stripLlmOverridesFromArgv(argv: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    // Handle --flag=value inline form
+    const [flag] = arg.split("=", 2) as [string, string | undefined];
+    if (LLM_OVERRIDE_FLAGS.has(flag)) {
+      // Boolean flags (--stream / --no-stream) consume no next arg
+      if (flag !== "--stream" && flag !== "--no-stream" && !arg.includes("=")) {
+        i++; // skip the value token
+      }
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
 export async function runProgram(
   argv: string[] = process.argv,
   hooks: ProgramHooks = {},
 ): Promise<void> {
   const program = createProgram(hooks);
-  await program.parseAsync(argv);
+  const cleanArgv = stripLlmOverridesFromArgv(argv);
+  await program.parseAsync(cleanArgv);
 }

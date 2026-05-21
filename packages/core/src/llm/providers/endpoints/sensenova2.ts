@@ -1,5 +1,5 @@
 /**
- * 商汤日日新 (SenseNova)
+ * 商汤日日新 2 (SenseNova 2)
  *
  * - 官网：https://platform.sensenova.cn/
  * - 控制台 / API key：https://console.sensecore.cn/aistudio/management/access-key
@@ -7,9 +7,9 @@
  */
 import type { InkosEndpoint } from "../types.js";
 
-export const SENSENOVA: InkosEndpoint = {
-  id: "sensenova",
-  label: "商汤日日新",
+export const SENSENOVA_2: InkosEndpoint = {
+  id: "sensenova_2",
+  label: "商汤日日新 2",
   group: "china",
   api: "openai-completions",
   baseUrl: "https://token.sensenova.cn/v1",

@@ -582,8 +582,7 @@ describe("ArchitectAgent", () => {
     await agent.generateFoundation(book);
 
     const options = chatSpy.mock.calls[0]?.[1] as { temperature?: number; maxTokens?: number } | undefined;
-    expect(options).toEqual(expect.objectContaining({ temperature: 0.8 }));
-    expect(options).not.toHaveProperty("maxTokens");
+    expect(options).toEqual(expect.objectContaining({ temperature: 0.8, maxTokens: 131072 }));
   });
 
   it("uses modelCard output budget when generating foundation from import", async () => {
@@ -644,8 +643,7 @@ describe("ArchitectAgent", () => {
     await agent.generateFoundationFromImport(book, "第一章正文");
 
     const options = chatSpy.mock.calls[0]?.[1] as { temperature?: number; maxTokens?: number } | undefined;
-    expect(options).toEqual(expect.objectContaining({ temperature: 0.5 }));
-    expect(options).not.toHaveProperty("maxTokens");
+    expect(options).toEqual(expect.objectContaining({ temperature: 0.5, maxTokens: 131072 }));
   });
 
   it("uses modelCard output budget when generating fanfic foundation", async () => {
@@ -706,8 +704,7 @@ describe("ArchitectAgent", () => {
     await agent.generateFanficFoundation(book, "正典文本", "canon");
 
     const options = chatSpy.mock.calls[0]?.[1] as { temperature?: number; maxTokens?: number } | undefined;
-    expect(options).toEqual(expect.objectContaining({ temperature: 0.7 }));
-    expect(options).not.toHaveProperty("maxTokens");
+    expect(options).toEqual(expect.objectContaining({ temperature: 0.7, maxTokens: 131072 }));
   });
 
   // ---- Phase 5 段落式架构稿专项 ----

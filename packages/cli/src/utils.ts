@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createLLMClient, StateManager, createLogger, createStderrSink, createJsonLineSink, resolveEffectiveLLMConfig, loadLLMEnvLayers, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH, type EffectiveLLMConfigResult, type LLMConfigCliOverrides, type ProjectConfig, type PipelineConfig, type LogSink } from "@actalk/inkos-core";
+import { createLLMClient, StateManager, createLogger, createStderrSink, createJsonLineSink, resolveEffectiveLLMConfig, loadLLMEnvLayers, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH, type EffectiveLLMConfigResult, type LLMConfigCliOverrides, type ProjectConfig, type PipelineConfig, type LogSink, type LogLevel } from "@actalk/inkos-core";
 import { formatSqliteMemorySupportWarning } from "./runtime-requirements.js";
 
 export { GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH };
@@ -123,7 +123,9 @@ export function buildPipelineConfig(
 
   const sinks: LogSink[] = [];
   if (!extra?.quiet) {
-    sinks.push(createStderrSink({ minLevel: "info" }));
+    const envLevel = process.env.INKOS_LOG_LEVEL as LogLevel | undefined;
+    const minLevel: LogLevel = (envLevel && ["debug", "info", "warn", "error"].includes(envLevel)) ? envLevel : "info";
+    sinks.push(createStderrSink({ minLevel }));
   }
   if (extra?.logFile) {
     sinks.push(createJsonLineSink(extra.logFile));
@@ -133,11 +135,21 @@ export function buildPipelineConfig(
   const logger = hasLogging ? createLogger({ tag: "inkos", sinks }) : undefined;
 
   const onStreamProgress = hasLogging
-    ? (progress: { readonly elapsedMs: number; readonly totalChars: number; readonly chineseChars: number; readonly status: string }) => {
+    ? (progress: { readonly elapsedMs: number; readonly totalChars: number; readonly chineseChars: number; readonly thinkingChars: number; readonly status: string; readonly label?: string; readonly recentText?: string; readonly currentSection?: string }) => {
         if (progress.status === "streaming") {
+          const now = new Date();
+          const timeStr = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+          const labelInfo = progress.label ? `[${progress.label}] ` : "";
+          const thinkingInfo = progress.thinkingChars > 0 ? ` | thinking ${progress.thinkingChars} chars` : "";
+          const sectionInfo = progress.currentSection ? ` → ${progress.currentSection}` : "";
           logger?.info(
-            `streaming ${Math.round(progress.elapsedMs / 1000)}s, ${progress.totalChars} chars (${progress.chineseChars} CJK)`,
+            `[${timeStr}] ${labelInfo}streaming ${Math.round(progress.elapsedMs / 1000)}s, ${progress.totalChars} chars (${progress.chineseChars} CJK)${thinkingInfo}${sectionInfo}`,
           );
+          // Debug: show what's currently being generated
+          if (progress.recentText) {
+            const preview = progress.recentText.length > 200 ? `…${progress.recentText.slice(-200)}` : progress.recentText;
+            logger?.debug(`[${timeStr}] ${labelInfo}recent output: ${JSON.stringify(preview)}`);
+          }
         }
       }
     : undefined;

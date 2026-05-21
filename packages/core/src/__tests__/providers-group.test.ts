@@ -14,7 +14,7 @@ describe("InkosEndpoint.group", () => {
     expect(byGroup("overseas")).toEqual(["anthropic", "google", "mistral", "openai", "xai"].sort());
     expect(byGroup("china")).toEqual([
       "ai360", "baichuan", "bailian", "deepseek", "hunyuan", "internlm", "longcat",
-      "minimax", "moonshot", "sensenova", "spark", "stepfun", "tencentcloud",
+      "minimax", "moonshot", "sensenova", "sensenova_2", "spark", "stepfun", "tencentcloud",
       "volcengine", "wenxin", "xiaomimimo", "zeroone", "zhipu",
     ].sort());
     expect(byGroup("aggregator")).toEqual([
