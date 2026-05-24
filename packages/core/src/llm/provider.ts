@@ -742,6 +742,7 @@ function stripThinkingModelArtifacts(text: string): string {
  * at the end, after the reasoning. We try to extract just the answer part.
  *
  * Strategies (in order):
+ * 0. If the text contains === SECTION: ... === markers (architect output), extract from the first marker to end
  * 1. If the text contains YAML frontmatter (---...---), extract from the first --- to end
  * 2. If the text contains a code block with yaml/yml/json, extract that block
  * 3. If the text has a clear "answer" or "output" section marker, extract from there
@@ -750,6 +751,35 @@ function stripThinkingModelArtifacts(text: string): string {
  *    give a specific error about format, which is more actionable than "empty response")
  */
 function extractAnswerFromReasoning(text: string): string {
+  // Strategy 0: === SECTION: name === markers (architect / foundation output)
+  // Thinking models may put the entire structured output inside reasoning_content.
+  // The architect agent uses === SECTION: story_frame ===, === SECTION: volume_map ===,
+  // etc. as structural markers. If we find at least 1 such marker, extract from the
+  // first marker to the end of the text, skipping the preceding reasoning noise.
+  // Note: threshold lowered from 2 to 1 because thinking models in retry scenarios
+  // may output only one section before exhausting their token budget.
+  {
+    const sectionMarkerPattern = /===\s*SECTION\s*[：:]\s*[^\n=]+?\s*===/gi;
+    const markerMatches = [...text.matchAll(sectionMarkerPattern)];
+    if (markerMatches.length >= 1) {
+      const firstMarkerPos = markerMatches[0]!.index!;
+      let extracted = text.slice(firstMarkerPos);
+      // Strip common leading indentation (thinking models often indent the answer)
+      const lines = extracted.split("\n");
+      const minIndent = lines.reduce((min, line) => {
+        if (line.trim() === "") return min;
+        const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0;
+        return Math.min(min, indent);
+      }, Infinity);
+      if (minIndent > 0 && minIndent < Infinity) {
+        extracted = lines.map(l => l.trim() === "" ? "" : l.slice(minIndent)).join("\n");
+      }
+      // Strip thinking model artifacts (code blocks wrapping the answer, italicized headings)
+      extracted = stripThinkingModelArtifacts(extracted);
+      return extracted;
+    }
+  }
+
   // Strategy 1: YAML frontmatter
   // Find the LAST ---...--- block (thinking models put the final answer at the end)
   // and strip common indentation.
@@ -1090,6 +1120,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
       ...(client._piModel?.headers ?? {}),
     },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(300000), // 5 min timeout for LLM API calls
   }, client.proxyUrl);
 
   if (!response.ok) {
@@ -1119,11 +1150,33 @@ async function chatCompletionViaCustomAnthropicCompatible(
   let content = "";
   let thinkingContent = "";
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let lastDataTime = Date.now();
+  let lastTextTime = Date.now(); // Track when actual text was last received
+  const STREAM_IDLE_TIMEOUT = 180000; // 3 min idle timeout for streaming
+  const TEXT_GENERATION_TIMEOUT = 300000; // 5 min timeout for no text generation (thinking-only stall)
 
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+
+      // Check for streaming idle timeout (no data at all)
+      const now = Date.now();
+      if (now - lastDataTime > STREAM_IDLE_TIMEOUT) {
+        monitor.stop();
+        throw wrapLLMError(new Error(`LLM streaming idle timeout: no data received for ${STREAM_IDLE_TIMEOUT / 1000}s`), errorCtx);
+      }
+
+      // Check for thinking-only stall (LLM thinking but not generating text)
+      if (now - lastTextTime > TEXT_GENERATION_TIMEOUT && thinkingContent.length > 0) {
+        monitor.stop();
+        throw wrapLLMError(new Error(`LLM thinking stall timeout: ${thinkingContent.length} chars thinking but 0 text output for ${TEXT_GENERATION_TIMEOUT / 1000}s`), errorCtx);
+      }
+
+      if (value && value.length > 0) {
+        lastDataTime = now;
+      }
+
       buffer += decoder.decode(value, { stream: true });
       const parsed = parseSseEvents(buffer);
       buffer = parsed.rest;
@@ -1137,11 +1190,14 @@ async function chatCompletionViaCustomAnthropicCompatible(
           content += json.delta.text;
           monitor.onChunk(json.delta.text);
           onTextDelta?.(json.delta.text);
+          lastDataTime = Date.now();
+          lastTextTime = Date.now();
         }
         // Collect thinking deltas for thinking model fallback
         if (json.type === "content_block_delta" && json.delta?.type === "thinking_delta" && typeof json.delta.thinking === "string") {
           thinkingContent += json.delta.thinking;
           monitor.onThinkingChunk(json.delta.thinking);
+          lastDataTime = Date.now();
         }
         if (json.type === "message_delta" && json.usage) {
           usage.completionTokens = json.usage.output_tokens ?? usage.completionTokens;
@@ -1206,6 +1262,7 @@ async function chatCompletionViaCustomOpenAICompatible(
       method: "POST",
       headers,
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(300000), // 5 min timeout for LLM API calls
     }, client.proxyUrl);
     if (!response.ok) {
       throw wrapLLMError(new Error(await readErrorResponse(response)), errorCtx);
@@ -1233,11 +1290,25 @@ async function chatCompletionViaCustomOpenAICompatible(
     let buffer = "";
     let content = "";
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let lastDataTime = Date.now();
+    const STREAM_IDLE_TIMEOUT = 180000; // 3 min idle timeout for streaming
 
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+
+        // Check for streaming idle timeout
+        const now = Date.now();
+        if (now - lastDataTime > STREAM_IDLE_TIMEOUT) {
+          monitor.stop();
+          throw wrapLLMError(new Error(`LLM streaming idle timeout: no data received for ${STREAM_IDLE_TIMEOUT / 1000}s`), errorCtx);
+        }
+
+        if (value && value.length > 0) {
+          lastDataTime = now;
+        }
+
         buffer += decoder.decode(value, { stream: true });
         const parsed = parseSseEvents(buffer);
         buffer = parsed.rest;
@@ -1248,6 +1319,7 @@ async function chatCompletionViaCustomOpenAICompatible(
             content += json.delta;
             monitor.onChunk(json.delta);
             onTextDelta?.(json.delta);
+            lastDataTime = Date.now();
           }
           if (json.type === "response.completed") {
             usage = {
@@ -1292,6 +1364,7 @@ async function chatCompletionViaCustomOpenAICompatible(
     method: "POST",
     headers,
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(300000), // 5 min timeout for LLM API calls
   }, client.proxyUrl);
   if (!response.ok) {
     const detail = await readErrorResponse(response);
@@ -1332,11 +1405,33 @@ async function chatCompletionViaCustomOpenAICompatible(
   let content = "";
   let reasoningContent = "";
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let lastDataTime = Date.now();
+  let lastTextTime = Date.now(); // Track when actual text was last received
+  const STREAM_IDLE_TIMEOUT = 180000; // 3 min idle timeout for streaming
+  const TEXT_GENERATION_TIMEOUT = 300000; // 5 min timeout for no text generation (thinking-only stall)
 
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+
+      // Check for streaming idle timeout (no data at all)
+      const now = Date.now();
+      if (now - lastDataTime > STREAM_IDLE_TIMEOUT) {
+        monitor.stop();
+        throw wrapLLMError(new Error(`LLM streaming idle timeout: no data received for ${STREAM_IDLE_TIMEOUT / 1000}s`), errorCtx);
+      }
+
+      // Check for thinking-only stall (LLM thinking but not generating text)
+      if (now - lastTextTime > TEXT_GENERATION_TIMEOUT && reasoningContent.length > 0) {
+        monitor.stop();
+        throw wrapLLMError(new Error(`LLM thinking stall timeout: ${reasoningContent.length} chars reasoning but 0 text output for ${TEXT_GENERATION_TIMEOUT / 1000}s`), errorCtx);
+      }
+
+      if (value && value.length > 0) {
+        lastDataTime = now;
+      }
+
       buffer += decoder.decode(value, { stream: true });
       const parsed = parseSseEvents(buffer);
       buffer = parsed.rest;
@@ -1348,11 +1443,14 @@ async function chatCompletionViaCustomOpenAICompatible(
           content += delta;
           monitor.onChunk(delta);
           onTextDelta?.(delta);
+          lastDataTime = Date.now();
+          lastTextTime = Date.now();
         } else {
           const reasoningDelta = extractChatDeltaReasoningContent(json);
           if (reasoningDelta) {
             reasoningContent += reasoningDelta;
             monitor.onThinkingChunk(reasoningDelta);
+            lastDataTime = Date.now();
           }
         }
         if (json?.usage) {

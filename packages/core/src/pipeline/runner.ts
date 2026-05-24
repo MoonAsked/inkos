@@ -3039,7 +3039,7 @@ ${matrix}`,
       book, chapterText,
       existingFoundationText, // externalContext: full foundation for merge
       undefined,
-      { importMode },
+      { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
     );
 
     // Write merged foundation files. Skip runtime files (pending_hooks,

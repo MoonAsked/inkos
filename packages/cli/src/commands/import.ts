@@ -216,9 +216,16 @@ importCommand
       } else {
         logError(`Chapter import failed: ${e}`);
       }
-      // Ensure the JSONL log stream is flushed before exiting
+      // Ensure the JSONL log stream is flushed before exiting.
+      // logStream.end() is async — we must wait for the "finish" event
+      // before calling process.exit(), otherwise the last log entry may be lost.
       if (logStream) {
-        try { logStream.end(); } catch {}
+        try {
+          await new Promise<void>((resolve) => {
+            logStream!.on("finish", resolve);
+            logStream!.end();
+          });
+        } catch {}
       }
       process.exit(1);
     }

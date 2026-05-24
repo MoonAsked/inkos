@@ -148,29 +148,87 @@ export class ArchitectAgent extends BaseAgent {
       ? `Generate the complete foundation for a ${gp.name} novel titled "${book.title}". Write everything in English.`
       : `请为标题为"${book.title}"的${gp.name}小说生成完整基础设定。`;
 
-    const maxParseRetries = 2;
+    const maxParseRetries = 3;
+    const accumulatedSections = new Map<string, string>();
+    let lastResponseContent = "";
+
     for (let attempt = 0; attempt <= maxParseRetries; attempt++) {
       this.log?.debug(`[architect] generateFoundation: LLM call attempt ${attempt + 1}/${maxParseRetries + 1}, maxTokens=131072, temperature=0.8`);
-      const response = await this.chat([
+
+      const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
         { role: "system", content: langPrefix + systemPrompt + revisePrompt },
         { role: "user", content: userMessage },
-      ], { maxTokens: 131072, temperature: 0.8 });
+      ];
+      if (attempt > 0 && lastResponseContent) {
+        // Use accumulatedMissing (not prevMissing from last response alone) so the
+        // continuation prompt accurately reflects what is still needed across all
+        // attempts.  Also list the already-completed sections so the LLM knows
+        // exactly what NOT to repeat.
+        const accumulatedAlready: string[] = [];
+        if (accumulatedSections.get("story_frame") || accumulatedSections.get("story_bible")) accumulatedAlready.push("story_frame");
+        if (accumulatedSections.get("volume_map") || accumulatedSections.get("volume_outline")) accumulatedAlready.push("volume_map");
+        if (accumulatedSections.get("roles")?.trim()) accumulatedAlready.push("roles");
+        if (accumulatedSections.get("book_rules")) accumulatedAlready.push("book_rules");
+        if (accumulatedSections.get("pending_hooks")) accumulatedAlready.push("pending_hooks");
+        const accumulatedMissingForPrompt: string[] = [];
+        if (!accumulatedSections.get("story_frame") && !accumulatedSections.get("story_bible")) accumulatedMissingForPrompt.push("story_frame");
+        if (!accumulatedSections.get("volume_map") && !accumulatedSections.get("volume_outline")) accumulatedMissingForPrompt.push("volume_map");
+        if (!accumulatedSections.get("roles")?.trim()) accumulatedMissingForPrompt.push("roles");
+        if (!accumulatedSections.get("book_rules")) accumulatedMissingForPrompt.push("book_rules");
+        if (!accumulatedSections.get("pending_hooks")) accumulatedMissingForPrompt.push("pending_hooks");
+
+        messages.push({ role: "assistant", content: lastResponseContent });
+        const continuationPrompt = resolvedLanguage === "en"
+          ? `Your output is still missing these required sections: ${accumulatedMissingForPrompt.join(", ")}. The following sections are already complete and MUST NOT be repeated: ${accumulatedAlready.join(", ")}. Output ONLY the missing sections (=== SECTION: ... === blocks). Do NOT repeat any section you already wrote. Obey the HARD BUDGET strictly.`
+          : `你的输出仍缺少以下必要 section：${accumulatedMissingForPrompt.join("、")}。以下 section 已完成，绝对不要重复输出：${accumulatedAlready.join("、")}。只输出缺失的 section（=== SECTION: ... === 块），不要重复已写的 section。严格遵守硬预算。`;
+        messages.push({ role: "user", content: continuationPrompt });
+      }
+
+      const response = await this.chat(messages, { maxTokens: 131072, temperature: 0.8 });
       this.log?.debug(`[architect] generateFoundation: LLM response received, ${response.content.length} chars`);
 
-      try {
-        return this.parseSections(response.content, resolvedLanguage);
-      } catch (parseError: any) {
-        const msg = parseError?.message ?? "";
-        const isMissingSections = msg.includes("missing required section");
-        if (isMissingSections && attempt < maxParseRetries) {
-          this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): ${msg} — retrying with feedback`);
-          const retryFeedback = resolvedLanguage === "en"
-            ? `\n\n[CRITICAL — your previous output was INCOMPLETE. It was missing required sections because earlier sections exceeded their char budgets and consumed all output tokens. You MUST:\n1. STRICTLY obey the HARD BUDGET: story_frame ≤ 3000, volume_map ≤ 4000, roles ≤ 8000, book_rules ≤ 500, pending_hooks ≤ 2000.\n2. Produce ALL 5 sections in order: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===.\n3. If any section feels too long, COMPRESS it. Do NOT let any section exceed its budget.\n4. Output is only complete after the last row of pending_hooks.]`
-            : `\n\n[严重——你上次的输出不完整。缺少必要 section 的原因是前面的 section 超出了字符预算，耗尽了输出 token。你必须：\n1. 严格遵守硬预算：story_frame ≤ 3000、volume_map ≤ 5000、roles ≤ 8000、book_rules ≤ 500、pending_hooks ≤ 2000。\n2. 按顺序输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。\n3. 如果任何 section 太长，必须压缩。任何 section 不得超过预算。\n4. 输出只有在 pending_hooks 最后一行写完后才算完成。]`;
-          userMessage += retryFeedback;
-          continue;
-        }
-        throw parseError;
+      // Merge sections from this response
+      const { found: currentSections, missing } = this.parseSectionsRaw(response.content);
+      for (const [name, content] of currentSections) {
+        if (content.trim()) accumulatedSections.set(name, content);
+      }
+
+      // Determine lastResponseContent for the next retry's assistant message.
+      // Same reasoning-noise protection as generateFoundationFromImport.
+      const extractedChars = [...currentSections.values()].reduce((sum, s) => sum + s.length, 0);
+      if (response.content.length > 10_000 && extractedChars < response.content.length * 0.1) {
+        this.log?.warn(`[architect] Response has ${response.content.length} chars but only ${extractedChars} chars of sections — using reconstructed sections as assistant content for retry`);
+        lastResponseContent = this.reconstructFromSections(currentSections);
+      } else {
+        lastResponseContent = response.content;
+      }
+
+      if (missing.length === 0) {
+        const mergedContent = this.reconstructFromSections(accumulatedSections);
+        return this.parseSections(mergedContent, resolvedLanguage);
+      }
+
+      // Check accumulated completeness
+      const accumulatedMissing: string[] = [];
+      if (!accumulatedSections.get("story_frame") && !accumulatedSections.get("story_bible")) accumulatedMissing.push("story_frame");
+      if (!accumulatedSections.get("volume_map") && !accumulatedSections.get("volume_outline")) accumulatedMissing.push("volume_map");
+      if (!accumulatedSections.get("roles")?.trim()) accumulatedMissing.push("roles");
+      if (!accumulatedSections.get("book_rules")) accumulatedMissing.push("book_rules");
+      if (!accumulatedSections.get("pending_hooks")) accumulatedMissing.push("pending_hooks");
+
+      if (accumulatedMissing.length === 0) {
+        const mergedContent = this.reconstructFromSections(accumulatedSections);
+        return this.parseSections(mergedContent, resolvedLanguage);
+      }
+
+      if (attempt < maxParseRetries) {
+        this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): still missing [${accumulatedMissing.join(", ")}] — retrying with continuation`);
+      } else {
+        const foundSections = [...accumulatedSections.keys()].filter(k => k);
+        const errMsg = `Architect output missing required section${accumulatedMissing.length > 1 ? "s" : ""}: ${accumulatedMissing.join(", ")}` +
+          ` (found: [${foundSections.join(", ")}], raw length: ${lastResponseContent.length})`;
+        this.log?.error(`[architect] parseSections failed after all retries: ${errMsg}`);
+        throw new Error(errMsg);
       }
     }
     throw new Error("Unexpected: generateFoundation retry loop exited without result");
@@ -619,12 +677,15 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
   // -------------------------------------------------------------------------
   // Parsing
   // -------------------------------------------------------------------------
-  private parseSections(content: string, language: "zh" | "en"): ArchitectOutput {
-    this.log?.debug(`[architect] parseSections: input ${content.length} chars, language=${language}`);
+  /**
+   * Parse section content and return a map of found sections + list of missing
+   * required section names. Does NOT throw — callers decide what to do with
+   * partial results.
+   */
+  private parseSectionsRaw(content: string, requiredSections?: readonly string[]): { found: Map<string, string>; missing: string[] } {
     const parsedSections = new Map<string, string>();
     const sectionPattern = /^\s*===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===\s*$/gim;
     const matches = [...content.matchAll(sectionPattern)];
-    this.log?.debug(`[architect] parseSections: found ${matches.length} SECTION markers`);
 
     for (let i = 0; i < matches.length; i++) {
       const match = matches[i]!;
@@ -635,14 +696,7 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
       parsedSections.set(normalizedName, content.slice(start, end).trim());
     }
 
-    // Debug: log each parsed section's character count
-    for (const [name, secContent] of parsedSections) {
-      this.log?.debug(`[architect] parseSections section "${name}": ${secContent.length} chars`);
-    }
-
-    // Hard budget enforcement: truncate sections that exceed their char budget
-    // so that an over-long section (especially book_rules) cannot crowd out
-    // later sections like pending_hooks.
+    // Hard budget enforcement
     const SECTION_BUDGET: Record<string, number> = {
       story_frame: 3000,
       volume_map: 4000,
@@ -658,6 +712,51 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
       }
     }
 
+    // Determine missing required sections
+    const storyFrame = parsedSections.get("story_frame") ?? "";
+    const volumeMap = parsedSections.get("volume_map") ?? "";
+    const rolesRaw = parsedSections.get("roles") ?? "";
+    const legacyStoryBible = parsedSections.get("story_bible") ?? "";
+    const legacyVolumeOutline = parsedSections.get("volume_outline") ?? "";
+    const bookRules = parsedSections.get("book_rules");
+    const pendingHooksRaw = parsedSections.get("pending_hooks");
+
+    const usingLegacyOutlineNames = !storyFrame && !volumeMap
+      && (legacyStoryBible.length > 0 || legacyVolumeOutline.length > 0);
+
+    const missing: string[] = [];
+    // Default: all 5 sections are required
+    const required = requiredSections ?? ["story_frame", "volume_map", "roles", "book_rules", "pending_hooks"];
+    if (required.includes("story_frame") && !(storyFrame || legacyStoryBible)) missing.push("story_frame");
+    if (required.includes("volume_map") && !(volumeMap || legacyVolumeOutline)) missing.push("volume_map");
+    if (required.includes("roles") && !rolesRaw.trim() && !usingLegacyOutlineNames) missing.push("roles");
+    if (required.includes("book_rules") && !bookRules) missing.push("book_rules");
+    if (required.includes("pending_hooks") && !pendingHooksRaw) missing.push("pending_hooks");
+
+    return { found: parsedSections, missing };
+  }
+
+  private parseSections(content: string, language: "zh" | "en", requiredSections?: readonly string[]): ArchitectOutput {
+    this.log?.debug(`[architect] parseSections: input ${content.length} chars, language=${language}`);
+    const { found: parsedSections, missing } = this.parseSectionsRaw(content, requiredSections);
+
+    // Debug: log each parsed section's character count
+    for (const [name, secContent] of parsedSections) {
+      this.log?.debug(`[architect] parseSections section "${name}": ${secContent.length} chars`);
+    }
+
+    if (missing.length > 0) {
+      const foundSections = [...parsedSections.keys()].filter(k => k);
+      const showPreview = process.env.INKOS_LOG_LLM_OUTPUT === "1" || process.env.INKOS_LOG_LLM_OUTPUT === "true";
+      const previewPart = showPreview
+        ? `, preview: ${JSON.stringify(content.length > 300 ? content.slice(0, 300) + "…" : content)}`
+        : "";
+      const errMsg = `Architect output missing required section${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}` +
+        ` (found: [${foundSections.join(", ")}], raw length: ${content.length}${previewPart})`;
+      this.log?.error(`[architect] parseSections: ${errMsg}`);
+      throw new Error(errMsg);
+    }
+
     // Phase 5 new sections take precedence.
     const storyFrame = parsedSections.get("story_frame") ?? "";
     const volumeMap = parsedSections.get("volume_map") ?? "";
@@ -665,56 +764,19 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     const rolesRaw = parsedSections.get("roles") ?? "";
 
     // Legacy sections (still produced for back-compat where needed).
-    // If the model used old section names we still accept them.
     const legacyStoryBible = parsedSections.get("story_bible") ?? "";
     const legacyVolumeOutline = parsedSections.get("volume_outline") ?? "";
     const bookRules = parsedSections.get("book_rules");
-    // Phase 5 consolidation: current_state is no longer a required section.
-    // Legacy books (v12 / Phase 5 initial / pre-revert) and import/fanfic
-    // regenerations may still produce it — accept the value when present,
-    // fall through to empty seed when absent (consolidator will populate at
-    // runtime). Era/setting anchors that used to motivate a separate
-    // current_state block now live naturally inside story_frame.世界观底色
-    // for genres that have a real-world year anchor; other genres (修仙/玄幻/
-    // 系统文) omit them entirely.
     const currentStateLegacy = parsedSections.get("current_state") ?? "";
     const pendingHooksRaw = parsedSections.get("pending_hooks");
 
-    // 5-section required contract: story_frame (or legacy story_bible),
-    // volume_map (or legacy volume_outline), roles, book_rules, pending_hooks.
-    //
-    // Backward compat: v12 outputs used story_bible/volume_outline and
-    // embedded character data inside story_bible — they had no roles block.
-    // When the model uses ONLY legacy section names, we accept an empty roles
-    // list (consolidator/readers fall back to the character_matrix shim).
-    // When the new story_frame / volume_map names are used we require roles.
-    const usingLegacyOutlineNames = !storyFrame && !volumeMap
-      && (legacyStoryBible.length > 0 || legacyVolumeOutline.length > 0);
-
-    const missing: string[] = [];
     const effectiveStoryFrame = storyFrame || legacyStoryBible;
     const effectiveVolumeMap = volumeMap || legacyVolumeOutline;
-    if (!effectiveStoryFrame) missing.push("story_frame");
-    if (!effectiveVolumeMap) missing.push("volume_map");
-    if (!rolesRaw.trim() && !usingLegacyOutlineNames) missing.push("roles");
-    if (!bookRules) missing.push("book_rules");
-    if (!pendingHooksRaw) missing.push("pending_hooks");
-    if (missing.length > 0) {
-      const foundSections = [...parsedSections.keys()].filter(k => k);
-      const showPreview = process.env.INKOS_LOG_LLM_OUTPUT === "1" || process.env.INKOS_LOG_LLM_OUTPUT === "true";
-      const previewPart = showPreview
-        ? `, preview: ${JSON.stringify(content.length > 300 ? content.slice(0, 300) + "…" : content)}`
-        : "";
-      throw new Error(
-        `Architect output missing required section${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}` +
-        ` (found: [${foundSections.join(", ")}], raw length: ${content.length}${previewPart})`,
-      );
-    }
 
     const roles = this.parseRoles(rolesRaw);
     this.log?.debug(`[architect] parseSections: parsed ${roles.length} roles`);
     const pendingHooks = this.normalizePendingHooksSection(
-      this.stripTrailingAssistantCoda(pendingHooksRaw!),
+      this.stripTrailingAssistantCoda(pendingHooksRaw ?? ""),
       effectiveVolumeMap,
     );
     this.log?.debug(`[architect] parseSections: normalized ${pendingHooks.length} pending hooks`);
@@ -727,7 +789,7 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     return {
       storyBible,
       volumeOutline,
-      bookRules: bookRules!,
+      bookRules: bookRules ?? "",
       // currentState: empty string when architect no longer emits the section;
       // writeFoundationFiles seeds current_state.md with a placeholder so
       // consolidator / state-bootstrap readers find a valid file on first boot.
@@ -1115,12 +1177,13 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     chaptersText: string,
     externalContext?: string,
     reviewFeedback?: string,
-    options?: { readonly importMode?: "continuation" | "series" },
+    options?: { readonly importMode?: "continuation" | "series"; readonly requiredSections?: readonly string[] },
   ): Promise<ArchitectOutput> {
     const { profile: gp, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
     const resolvedLanguage = book.language ?? gp.language;
-    this.log?.debug(`[architect] generateFoundationFromImport: genre=${book.genre}, language=${resolvedLanguage}, importMode=${options?.importMode ?? "default"}, chaptersText=${chaptersText.length} chars`);
+    const requiredSections = options?.requiredSections ?? ["story_frame", "volume_map", "roles", "book_rules", "pending_hooks"];
+    this.log?.debug(`[architect] generateFoundationFromImport: genre=${book.genre}, language=${resolvedLanguage}, importMode=${options?.importMode ?? "default"}, chaptersText=${chaptersText.length} chars, requiredSections=[${requiredSections.join(",")}]`);
     const reviewFeedbackBlock = this.buildReviewFeedbackBlock(reviewFeedback, resolvedLanguage);
 
     const contextBlock = externalContext
@@ -1302,37 +1365,126 @@ name: <角色名>
       ? `Generate the complete foundation for an imported ${gp.name} novel titled "${book.title}". Write everything in English.\n\n${safeText}${truncationNote}`
       : `以下是《${book.title}》的已有正文资料包，请从中反向推导完整基础设定：\n\n${safeText}${truncationNote}`;
 
-    const maxParseRetries = 2;
+    const maxParseRetries = 3;
     const importMaxTokens = 131072;
+    // Accumulate sections across retries so partial progress is preserved.
+    const accumulatedSections = new Map<string, string>();
+    let lastResponseContent = "";
+
     for (let attempt = 0; attempt <= maxParseRetries; attempt++) {
       this.log?.debug(`[architect] generateFoundationFromImport: LLM call attempt ${attempt + 1}/${maxParseRetries + 1}, maxTokens=${importMaxTokens}, temperature=0.5`);
-      const response = await this.chat([
+
+      // Build messages: on retry, include the previous assistant output and
+      // a continuation prompt so the LLM picks up where it left off.
+      const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
-      ], { maxTokens: importMaxTokens, temperature: 0.5 });
+      ];
+      if (attempt > 0 && lastResponseContent) {
+        // Use accumulatedMissing (not prevMissing from last response alone) so the
+        // continuation prompt accurately reflects what is still needed across all
+        // attempts.  Also list the already-completed sections so the LLM knows
+        // exactly what NOT to repeat.
+        const accumulatedAlready: string[] = [];
+        if (requiredSections.includes("story_frame") && (accumulatedSections.get("story_frame") || accumulatedSections.get("story_bible"))) accumulatedAlready.push("story_frame");
+        if (requiredSections.includes("volume_map") && (accumulatedSections.get("volume_map") || accumulatedSections.get("volume_outline"))) accumulatedAlready.push("volume_map");
+        if (requiredSections.includes("roles") && accumulatedSections.get("roles")?.trim()) accumulatedAlready.push("roles");
+        if (requiredSections.includes("book_rules") && accumulatedSections.get("book_rules")) accumulatedAlready.push("book_rules");
+        if (requiredSections.includes("pending_hooks") && accumulatedSections.get("pending_hooks")) accumulatedAlready.push("pending_hooks");
+        const accumulatedMissingForPrompt: string[] = [];
+        if (requiredSections.includes("story_frame") && !accumulatedSections.get("story_frame") && !accumulatedSections.get("story_bible")) accumulatedMissingForPrompt.push("story_frame");
+        if (requiredSections.includes("volume_map") && !accumulatedSections.get("volume_map") && !accumulatedSections.get("volume_outline")) accumulatedMissingForPrompt.push("volume_map");
+        if (requiredSections.includes("roles") && !accumulatedSections.get("roles")?.trim()) accumulatedMissingForPrompt.push("roles");
+        if (requiredSections.includes("book_rules") && !accumulatedSections.get("book_rules")) accumulatedMissingForPrompt.push("book_rules");
+        if (requiredSections.includes("pending_hooks") && !accumulatedSections.get("pending_hooks")) accumulatedMissingForPrompt.push("pending_hooks");
+
+        messages.push({ role: "assistant", content: lastResponseContent });
+        const continuationPrompt = resolvedLanguage === "en"
+          ? `Your output is still missing these required sections: ${accumulatedMissingForPrompt.join(", ")}. The following sections are already complete and MUST NOT be repeated: ${accumulatedAlready.join(", ")}. Output ONLY the missing sections (=== SECTION: ... === blocks). Do NOT repeat any section you already wrote. Obey the HARD BUDGET strictly.`
+          : `你的输出仍缺少以下必要 section：${accumulatedMissingForPrompt.join("、")}。以下 section 已完成，绝对不要重复输出：${accumulatedAlready.join("、")}。只输出缺失的 section（=== SECTION: ... === 块），不要重复已写的 section。严格遵守硬预算。`;
+        messages.push({ role: "user", content: continuationPrompt });
+      }
+
+      const response = await this.chat(messages, { maxTokens: importMaxTokens, temperature: 0.5 });
       this.log?.debug(`[architect] generateFoundationFromImport: LLM response received, ${response.content.length} chars`);
 
-      try {
-        return this.parseSections(response.content, resolvedLanguage);
-      } catch (parseError: any) {
-        const msg = parseError?.message ?? "";
-        const isMissingSections = msg.includes("missing required section");
-        if (isMissingSections && attempt < maxParseRetries) {
-          this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): ${msg} — retrying with feedback`);
-          // Append feedback about missing sections to the user message for the retry.
-          // Include budget reminder so the LLM compresses over-long sections
-          // instead of just being told to "keep going".
-          const retryFeedback = resolvedLanguage === "en"
-            ? `\n\n[CRITICAL — your previous output was INCOMPLETE. It was missing required sections because earlier sections (especially volume_map) exceeded their char budgets and consumed all output tokens. You MUST:\n1. STRICTLY obey the HARD BUDGET: story_frame ≤ 3000, volume_map ≤ 4000, roles ≤ 8000, book_rules ≤ 500, pending_hooks ≤ 2000.\n2. Produce ALL 5 sections in order: === SECTION: story_frame ===, === SECTION: volume_map ===, === SECTION: roles ===, === SECTION: book_rules ===, === SECTION: pending_hooks ===.\n3. If volume_map feels too long, COMPRESS it — merge volumes, shorten paragraphs. Do NOT let any section exceed its budget.\n4. Output is only complete after the last row of pending_hooks.]`
-            : `\n\n[严重——你上次的输出不完整。缺少必要 section 的原因是前面的 section（尤其是 volume_map）超出了字符预算，耗尽了输出 token。你必须：\n1. 严格遵守硬预算：story_frame ≤ 3000、volume_map ≤ 5000、roles ≤ 8000、book_rules ≤ 500、pending_hooks ≤ 2000。\n2. 按顺序输出全部 5 个 section：=== SECTION: story_frame ===、=== SECTION: volume_map ===、=== SECTION: roles ===、=== SECTION: book_rules ===、=== SECTION: pending_hooks ===。\n3. 如果 volume_map 太长，必须压缩——合并卷、缩短段落。任何 section 不得超过预算。\n4. 输出只有在 pending_hooks 最后一行写完后才算完成。]`;
-          userMessage += retryFeedback;
-          continue;
+      // Merge sections from this response into accumulatedSections
+      const { found: currentSections, missing } = this.parseSectionsRaw(response.content, requiredSections);
+      for (const [name, content] of currentSections) {
+        if (content.trim()) {
+          accumulatedSections.set(name, content);
         }
-        throw parseError;
+      }
+
+      // Determine lastResponseContent for the next retry's assistant message.
+      // If the response is very long but only yielded a small amount of section content,
+      // it likely contains reasoning/thinking noise. Using the raw response as the
+      // assistant message for the next retry would waste the context window and
+      // cause the LLM to repeat the same thinking-only pattern. Instead, reconstruct
+      // only the extracted sections so the continuation prompt gets a clean signal.
+      const extractedChars = [...currentSections.values()].reduce((sum, s) => sum + s.length, 0);
+      if (response.content.length > 10_000 && extractedChars < response.content.length * 0.1) {
+        this.log?.warn(`[architect] Response has ${response.content.length} chars but only ${extractedChars} chars of sections — using reconstructed sections as assistant content for retry`);
+        lastResponseContent = this.reconstructFromSections(currentSections);
+      } else {
+        lastResponseContent = response.content;
+      }
+
+      // Log each section's char count
+      for (const [name, secContent] of accumulatedSections) {
+        this.log?.debug(`[architect] parseSections section "${name}": ${secContent.length} chars (accumulated)`);
+      }
+
+      if (missing.length === 0) {
+        // All sections present in accumulatedSections — parse and return
+        const mergedContent = this.reconstructFromSections(accumulatedSections);
+        return this.parseSections(mergedContent, resolvedLanguage, requiredSections);
+      }
+
+      // Check if accumulated sections are now complete even though this
+      // individual response was partial
+      const accumulatedMissing: string[] = [];
+      if (requiredSections.includes("story_frame") && !accumulatedSections.get("story_frame") && !accumulatedSections.get("story_bible")) accumulatedMissing.push("story_frame");
+      if (requiredSections.includes("volume_map") && !accumulatedSections.get("volume_map") && !accumulatedSections.get("volume_outline")) accumulatedMissing.push("volume_map");
+      if (requiredSections.includes("roles") && !accumulatedSections.get("roles")?.trim()) accumulatedMissing.push("roles");
+      if (requiredSections.includes("book_rules") && !accumulatedSections.get("book_rules")) accumulatedMissing.push("book_rules");
+      if (requiredSections.includes("pending_hooks") && !accumulatedSections.get("pending_hooks")) accumulatedMissing.push("pending_hooks");
+
+      if (accumulatedMissing.length === 0) {
+        const mergedContent = this.reconstructFromSections(accumulatedSections);
+        return this.parseSections(mergedContent, resolvedLanguage, requiredSections);
+      }
+
+      if (attempt < maxParseRetries) {
+        this.log?.warn(`[architect] parseSections failed (attempt ${attempt + 1}/${maxParseRetries + 1}): still missing [${accumulatedMissing.join(", ")}] — retrying with continuation`);
+      } else {
+        const foundSections = [...accumulatedSections.keys()].filter(k => k);
+        const errMsg = `Architect output missing required section${accumulatedMissing.length > 1 ? "s" : ""}: ${accumulatedMissing.join(", ")}` +
+          ` (found: [${foundSections.join(", ")}], raw length: ${lastResponseContent.length})`;
+        this.log?.error(`[architect] parseSections failed after all retries: ${errMsg}`);
+        throw new Error(errMsg);
       }
     }
-    // Unreachable, but TypeScript needs it
     throw new Error("Unexpected: generateFoundationFromImport retry loop exited without result");
+  }
+
+  /** Reconstruct a full section-delimited string from a map of section name → content. */
+  private reconstructFromSections(sections: Map<string, string>): string {
+    const order = ["story_frame", "volume_map", "roles", "book_rules", "pending_hooks"];
+    const parts: string[] = [];
+    for (const name of order) {
+      const content = sections.get(name);
+      if (content?.trim()) {
+        parts.push(`=== SECTION: ${name} ===\n${content}`);
+      }
+    }
+    // Also include any non-standard sections that were found
+    for (const [name, content] of sections) {
+      if (!order.includes(name) && content?.trim()) {
+        parts.push(`=== SECTION: ${name} ===\n${content}`);
+      }
+    }
+    return parts.join("\n\n");
   }
 
   async generateFanficFoundation(
