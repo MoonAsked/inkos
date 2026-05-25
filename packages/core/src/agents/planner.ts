@@ -309,6 +309,15 @@ export class PlannerAgent extends BaseAgent {
       return `---\n${fixedYaml}\n---\n${body}`;
     }
 
+    if (parseErrorMessage === "missing sections: ## 不要做") {
+      const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (!match) return undefined;
+      const yamlText = match[1]!;
+      const body = match[2]!.trimEnd();
+      const doNotHeading = body.includes("## Current task") ? "## Do not\nNone." : "## 不要做\n无";
+      return `---\n${yamlText}\n---\n${body}\n\n${doNotHeading}\n`;
+    }
+
     if (parseErrorMessage !== "missing YAML frontmatter delimiters") {
       return undefined;
     }

@@ -233,6 +233,24 @@ describe("PlannerAgent.planChapter memo generation", () => {
     expect(result.memo.body).toContain("## 本章 hook 账");
   });
 
+  it("recovers a memo that only omitted the optional do-not section", async () => {
+    const bodyWithoutDoNot = VALID_BODY.replace(/\n\n## 不要做\n[\s\S]*$/, "");
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `---\nchapter: 575\ngoal: 推进许泓泊现身后的局势变化\nthreadRefs: []\n---\n${bodyWithoutDoNot}\n`,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 575,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(575);
+    expect(result.memo.body).toContain("## 不要做\n无");
+  });
+
   // Phase hotfix 4: English books must receive English system + user prompts
   // and English golden-opening guidance for chapters ≤ 3.
   it("uses English prompts end-to-end when book.language is en", async () => {
