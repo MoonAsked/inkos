@@ -346,6 +346,21 @@ function stripReservedKeys(extra: Record<string, unknown>): Record<string, unkno
   return result;
 }
 
+async function fetchWithProxyTimeout(
+  input: Parameters<typeof fetch>[0],
+  init: RequestInit,
+  explicitProxyUrl: string | undefined,
+  timeoutMs = 300000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchWithProxy(input, { ...init, signal: controller.signal }, explicitProxyUrl);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // === Fixed-Temperature Model Clamp ===
 //
 // 部分 thinking 模型（如 Moonshot kimi-k2.5/k2.6、kimi-k2-thinking）的 API
@@ -574,9 +589,14 @@ async function withRateLimitRetry<T>(
 }
 
 function shouldUseNativeCustomTransport(client: LLMClient): boolean {
-  return client.configSource === "studio"
+  const baseUrl = client._piModel?.baseUrl ?? "";
+  const isLocalOpenAICompatible = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(baseUrl)
+    && !client._apiKey
+    && (client.service === "custom" || client.service === "ollama")
+    && client.provider === "openai";
+  return isLocalOpenAICompatible || (client.configSource === "studio"
     && client.service === "custom"
-    && (client.provider === "openai" || client.provider === "anthropic");
+    && (client.provider === "openai" || client.provider === "anthropic"));
 }
 
 function buildCustomHeaders(client: LLMClient): Record<string, string> {
@@ -752,10 +772,38 @@ function stripThinkingModelArtifacts(text: string): string {
  * 2. If the text contains a code block with yaml/yml/json, extract that block
  * 3. If the text has a clear "answer" or "output" section marker, extract from there
  * 4. If the text ends with structured content (YAML-like key: value lines), extract that tail
- * 5. Otherwise, return the full text (better than empty — downstream parsers will
- *    give a specific error about format, which is more actionable than "empty response")
+ * If no high-confidence answer is found, only fall back to the raw text when it
+ * does not look like an internal reasoning transcript. Returning prompt-like
+ * reasoning is unsafe: downstream section parsers can mistake references such
+ * as `=== SECTION: story_frame ===` for real output.
  */
-function extractAnswerFromReasoning(text: string): string {
+function normalizeReasoningSectionName(name: string): string {
+  return name
+    .trim()
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[`"'*_]/g, " ")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const REASONING_SECTION_NAMES = new Set([
+  "story_frame",
+  "volume_map",
+  "roles",
+  "book_rules",
+  "pending_hooks",
+  "rhythm_principles",
+  "current_state",
+  "story_bible",
+  "volume_outline",
+]);
+
+function isRecognizedReasoningSectionName(name: string): boolean {
+  return REASONING_SECTION_NAMES.has(normalizeReasoningSectionName(name));
+}
+
+function extractAnswerFromReasoning(text: string): string | undefined {
   // Strategy 0: === SECTION: name === markers (architect / foundation output)
   // Thinking models may put the entire structured output inside reasoning_content.
   // The architect agent uses === SECTION: story_frame ===, === SECTION: volume_map ===,
@@ -773,19 +821,27 @@ function extractAnswerFromReasoning(text: string): string {
     // line-start or newline, followed by newline or end-of-text).
     // This avoids matching inline references like:
     //   "Output `=== SECTION: story_frame ===`, `=== SECTION: volume_map ===`"
-    const sectionMarkerLinePattern = /(?:^|\n)\s*(===\s*SECTION\s*[：:]\s*[^\n=]+?\s*===)\s*(?:\n|$)/gi;
-    const markerMatches = [...text.matchAll(sectionMarkerLinePattern)];
+    const sectionMarkerLinePattern = /(?:^|\n)[ \t]*(===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===)[ \t]*(?:\n|$)/gi;
+    const markerMatches = [...text.matchAll(sectionMarkerLinePattern)]
+      .map((match) => {
+        const fullMatch = match[0] ?? "";
+        const marker = match[1] ?? "";
+        const rawName = match[2] ?? "";
+        const markerOffset = fullMatch.indexOf(marker);
+        const start = (match.index ?? 0) + (markerOffset >= 0 ? markerOffset : 0);
+        const contentStart = (match.index ?? 0) + fullMatch.length;
+        return { match, rawName, start, contentStart };
+      })
+      .filter(({ rawName }) => isRecognizedReasoningSectionName(rawName));
     if (markerMatches.length >= 1) {
       // Find the first marker that starts a block with actual content.
       // A marker is "real" if the text between it and the next marker (or end)
       // contains at least 50 chars of non-reasoning content.
       let bestStart = -1;
       for (let i = 0; i < markerMatches.length; i++) {
-        const match = markerMatches[i]!;
-        // The captured group (1) is the === SECTION: ... === text
-        const markerEnd = (match.index ?? 0) + match[0]!.length;
-        const nextMarkerStart = markerMatches[i + 1]?.index ?? text.length;
-        const contentBetween = text.slice(markerEnd, nextMarkerStart).trim();
+        const marker = markerMatches[i]!;
+        const nextMarkerStart = markerMatches[i + 1]?.start ?? text.length;
+        const contentBetween = text.slice(marker.contentStart, nextMarkerStart).trim();
         // Check if this content looks like actual section content rather than
         // reasoning discussion. Real content typically has prose paragraphs,
         // markdown headings (##), role blocks (---ROLE---), or YAML.
@@ -798,13 +854,15 @@ function extractAnswerFromReasoning(text: string): string {
           // constraint descriptions, etc.
           if (/^\*\s/.test(trimmed) && /`===\s*SECTION/.test(trimmed)) return false;
           if (/^[-*]\s/.test(trimmed) && trimmed.length < 80) return false;
+          if (/^[-*]\s/.test(trimmed) && /(constraint|must|should|output|section|budget|missing|required|已完成|缺少|必须|不要|预算|检查)/i.test(trimmed)) return false;
+          if (/^(wait|okay|now|let'?s|i will|i need|final decision)\b/i.test(trimmed)) return false;
           // Keep lines that look like actual content: prose, headings, YAML, role blocks
           return true;
         });
         const nonReasoningChars = nonReasoningLines.reduce((sum, l) => sum + l.length, 0);
         if (nonReasoningChars >= 50) {
           // This marker has real content after it
-          bestStart = match.index ?? 0;
+          bestStart = marker.start;
           break;
         }
       }
@@ -1088,8 +1146,18 @@ function extractAnswerFromReasoning(text: string): string {
     }
   }
 
-  // Strategy 6: Return full text — downstream will give a specific parse error
-  return text;
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  if (/===\s*SECTION\s*[：:]/i.test(trimmed) || /^---ROLE---$/m.test(trimmed)) {
+    return undefined;
+  }
+  const reasoningCueMatches = trimmed.match(
+    /\b(?:wait|okay|now|let'?s|i will|i need|final decision|constraint|must|should|missing|required|prompt|section|budget)\b|(?:缺少|必须|不要|预算|检查|输出|已完成|重试)/gi,
+  ) ?? [];
+  if (trimmed.length > 500 && reasoningCueMatches.length >= 2) {
+    return undefined;
+  }
+  return trimmed;
 }
 
 function extractChatContent(json: any): string {
@@ -1101,8 +1169,11 @@ function extractChatContent(json: any): string {
   const reasoningContent = extractOpenAITextPart(message?.reasoning_content);
   if (reasoningContent) {
     const extracted = extractAnswerFromReasoning(reasoningContent);
-    console.warn(`[inkos] Non-stream response has empty content but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
-    return extracted;
+    if (extracted) {
+      console.warn(`[inkos] Non-stream response has empty content but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
+      return extracted;
+    }
+    console.warn(`[inkos] Non-stream response has empty content and ${reasoningContent.length} chars of reasoning_content, but no final answer could be extracted`);
   }
   return "";
 }
@@ -1140,8 +1211,11 @@ function extractResponsesContent(json: any): string {
     .join("");
   if (thinkingContent) {
     const extracted = extractAnswerFromReasoning(thinkingContent);
-    console.warn(`[inkos] Responses API has 0 text but ${thinkingContent.length} chars of reasoning content — extracted ${extracted.length} chars as answer (thinking model)`);
-    return extracted;
+    if (extracted) {
+      console.warn(`[inkos] Responses API has 0 text but ${thinkingContent.length} chars of reasoning content — extracted ${extracted.length} chars as answer (thinking model)`);
+      return extracted;
+    }
+    console.warn(`[inkos] Responses API has 0 text and ${thinkingContent.length} chars of reasoning content, but no final answer could be extracted`);
   }
   return "";
 }
@@ -1159,8 +1233,11 @@ function extractAnthropicContent(json: any): string {
     .join("");
   if (thinkingContent) {
     const extracted = extractAnswerFromReasoning(thinkingContent);
-    console.warn(`[inkos] Anthropic response has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
-    return extracted;
+    if (extracted) {
+      console.warn(`[inkos] Anthropic response has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+      return extracted;
+    }
+    console.warn(`[inkos] Anthropic response has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
   }
   return "";
 }
@@ -1175,7 +1252,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
 ): Promise<LLMResponse> {
   const baseUrl = client._piModel?.baseUrl ?? "";
   const errorCtx = { baseUrl, model };
-  const monitor = createStreamMonitor(onStreamProgress);
+  const monitor = client.stream ? createStreamMonitor(onStreamProgress) : undefined;
   const extra = stripReservedKeys(resolved.extra);
   const payload: Record<string, unknown> = {
     model,
@@ -1188,7 +1265,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
   const system = joinSystemPrompt(messages);
   if (system) payload.system = system;
 
-  const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/messages`, {
+  const response = await fetchWithProxyTimeout(`${baseUrl.replace(/\/$/, "")}/messages`, {
     method: "POST",
     headers: {
       "User-Agent": INKOS_USER_AGENT,
@@ -1199,7 +1276,6 @@ async function chatCompletionViaCustomAnthropicCompatible(
       ...(client._piModel?.headers ?? {}),
     },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(300000), // 5 min timeout for LLM API calls
   }, client.proxyUrl);
 
   if (!response.ok) {
@@ -1242,13 +1318,13 @@ async function chatCompletionViaCustomAnthropicCompatible(
       // Check for streaming idle timeout (no data at all)
       const now = Date.now();
       if (now - lastDataTime > STREAM_IDLE_TIMEOUT) {
-        monitor.stop();
+        monitor?.stop();
         throw wrapLLMError(new Error(`LLM streaming idle timeout: no data received for ${STREAM_IDLE_TIMEOUT / 1000}s`), errorCtx);
       }
 
       // Check for thinking-only stall (LLM thinking but not generating text)
       if (now - lastTextTime > TEXT_GENERATION_TIMEOUT && thinkingContent.length > 0) {
-        monitor.stop();
+        monitor?.stop();
         throw wrapLLMError(new Error(`LLM thinking stall timeout: ${thinkingContent.length} chars thinking but 0 text output for ${TEXT_GENERATION_TIMEOUT / 1000}s`), errorCtx);
       }
 
@@ -1267,7 +1343,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
         }
         if (json.type === "content_block_delta" && json.delta?.type === "text_delta" && typeof json.delta.text === "string") {
           content += json.delta.text;
-          monitor.onChunk(json.delta.text);
+          monitor?.onChunk(json.delta.text);
           onTextDelta?.(json.delta.text);
           lastDataTime = Date.now();
           lastTextTime = Date.now();
@@ -1275,7 +1351,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
         // Collect thinking deltas for thinking model fallback
         if (json.type === "content_block_delta" && json.delta?.type === "thinking_delta" && typeof json.delta.thinking === "string") {
           thinkingContent += json.delta.thinking;
-          monitor.onThinkingChunk(json.delta.thinking);
+          monitor?.onThinkingChunk(json.delta.thinking);
           lastDataTime = Date.now();
         }
         if (json.type === "message_delta" && json.usage) {
@@ -1287,14 +1363,18 @@ async function chatCompletionViaCustomAnthropicCompatible(
       }
     }
   } finally {
-    monitor.stop();
+    monitor?.stop();
   }
 
   // Thinking model fallback
   if (!content && thinkingContent) {
     const extracted = extractAnswerFromReasoning(thinkingContent);
-    console.warn(`[inkos] Anthropic stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
-    content = extracted;
+    if (extracted) {
+      console.warn(`[inkos] Anthropic stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+      content = extracted;
+    } else {
+      console.warn(`[inkos] Anthropic stream has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
+    }
   }
 
   if (!content) {
@@ -1321,7 +1401,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   const baseUrl = client._piModel?.baseUrl ?? "";
   const headers = buildCustomHeaders(client);
   const errorCtx = { baseUrl, model };
-  const monitor = createStreamMonitor(onStreamProgress);
+  const monitor = client.stream ? createStreamMonitor(onStreamProgress) : undefined;
   const extra = stripReservedKeys(resolved.extra);
 
   if (client.apiFormat === "responses") {
@@ -1337,11 +1417,10 @@ async function chatCompletionViaCustomOpenAICompatible(
     const instructions = joinSystemPrompt(messages);
     if (instructions) payload.instructions = instructions;
 
-    const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/responses`, {
+    const response = await fetchWithProxyTimeout(`${baseUrl.replace(/\/$/, "")}/responses`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(300000), // 5 min timeout for LLM API calls
     }, client.proxyUrl);
     if (!response.ok) {
       throw wrapLLMError(new Error(await readErrorResponse(response)), errorCtx);
@@ -1380,7 +1459,7 @@ async function chatCompletionViaCustomOpenAICompatible(
         // Check for streaming idle timeout
         const now = Date.now();
         if (now - lastDataTime > STREAM_IDLE_TIMEOUT) {
-          monitor.stop();
+          monitor?.stop();
           throw wrapLLMError(new Error(`LLM streaming idle timeout: no data received for ${STREAM_IDLE_TIMEOUT / 1000}s`), errorCtx);
         }
 
@@ -1396,7 +1475,7 @@ async function chatCompletionViaCustomOpenAICompatible(
           const json = JSON.parse(event.data);
           if (json.type === "response.output_text.delta" && typeof json.delta === "string") {
             content += json.delta;
-            monitor.onChunk(json.delta);
+            monitor?.onChunk(json.delta);
             onTextDelta?.(json.delta);
             lastDataTime = Date.now();
           }
@@ -1413,7 +1492,7 @@ async function chatCompletionViaCustomOpenAICompatible(
         }
       }
     } finally {
-      monitor.stop();
+      monitor?.stop();
     }
 
     if (!content) {
@@ -1439,11 +1518,10 @@ async function chatCompletionViaCustomOpenAICompatible(
     payload.stream_options = { include_usage: true };
   }
 
-  const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+  const response = await fetchWithProxyTimeout(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(300000), // 5 min timeout for LLM API calls
   }, client.proxyUrl);
   if (!response.ok) {
     const detail = await readErrorResponse(response);
@@ -1497,13 +1575,13 @@ async function chatCompletionViaCustomOpenAICompatible(
       // Check for streaming idle timeout (no data at all)
       const now = Date.now();
       if (now - lastDataTime > STREAM_IDLE_TIMEOUT) {
-        monitor.stop();
+        monitor?.stop();
         throw wrapLLMError(new Error(`LLM streaming idle timeout: no data received for ${STREAM_IDLE_TIMEOUT / 1000}s`), errorCtx);
       }
 
       // Check for thinking-only stall (LLM thinking but not generating text)
       if (now - lastTextTime > TEXT_GENERATION_TIMEOUT && reasoningContent.length > 0) {
-        monitor.stop();
+        monitor?.stop();
         throw wrapLLMError(new Error(`LLM thinking stall timeout: ${reasoningContent.length} chars reasoning but 0 text output for ${TEXT_GENERATION_TIMEOUT / 1000}s`), errorCtx);
       }
 
@@ -1520,7 +1598,7 @@ async function chatCompletionViaCustomOpenAICompatible(
         const delta = extractChatDeltaContent(json);
         if (delta) {
           content += delta;
-          monitor.onChunk(delta);
+          monitor?.onChunk(delta);
           onTextDelta?.(delta);
           lastDataTime = Date.now();
           lastTextTime = Date.now();
@@ -1528,7 +1606,7 @@ async function chatCompletionViaCustomOpenAICompatible(
           const reasoningDelta = extractChatDeltaReasoningContent(json);
           if (reasoningDelta) {
             reasoningContent += reasoningDelta;
-            monitor.onThinkingChunk(reasoningDelta);
+            monitor?.onThinkingChunk(reasoningDelta);
             lastDataTime = Date.now();
           }
         }
@@ -1542,7 +1620,7 @@ async function chatCompletionViaCustomOpenAICompatible(
       }
     }
   } finally {
-    monitor.stop();
+    monitor?.stop();
   }
 
   // Thinking model fallback: if content is empty but reasoning_content exists,
@@ -1550,8 +1628,12 @@ async function chatCompletionViaCustomOpenAICompatible(
   // Try to extract the structured answer from the reasoning content.
   if (!content && reasoningContent) {
     const extracted = extractAnswerFromReasoning(reasoningContent);
-    console.warn(`[inkos] Stream has 0 content chars but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
-    content = extracted;
+    if (extracted) {
+      console.warn(`[inkos] Stream has 0 content chars but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
+      content = extracted;
+    } else {
+      console.warn(`[inkos] Stream has 0 content chars and ${reasoningContent.length} chars of reasoning_content, but no final answer could be extracted`);
+    }
   }
 
   if (!content) {
@@ -1794,15 +1876,18 @@ async function chatCompletionViaPiAi(
       .join("");
     if (!content && thinkingContent) {
       const extracted = extractAnswerFromReasoning(thinkingContent);
-      console.warn(`[inkos] Pi-ai non-stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
-      return {
-        content: extracted,
-        usage: {
-          promptTokens: response.usage.input,
-          completionTokens: response.usage.output,
-          totalTokens: response.usage.totalTokens,
-        },
-      };
+      if (extracted) {
+        console.warn(`[inkos] Pi-ai non-stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+        return {
+          content: extracted,
+          usage: {
+            promptTokens: response.usage.input,
+            completionTokens: response.usage.output,
+            totalTokens: response.usage.totalTokens,
+          },
+        };
+      }
+      console.warn(`[inkos] Pi-ai non-stream has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
     }
     if (!content) {
       const diag = `usage=${response.usage.input}+${response.usage.output}`;
@@ -1869,17 +1954,20 @@ async function chatCompletionViaPiAi(
   if (!content && thinkingChunks.length > 0) {
     const thinkingContent = thinkingChunks.join("");
     const extracted = extractAnswerFromReasoning(thinkingContent);
-    console.warn(`[inkos] Pi-ai stream has 0 text_delta but ${thinkingContent.length} chars of thinking_delta — extracted ${extracted.length} chars as answer (thinking model)`);
-    console.warn(`[inkos] thinking_delta tail (last 800 chars): ${JSON.stringify(thinkingContent.slice(-800))}`);
-    console.warn(`[inkos] extracted preview (first 500 chars): ${JSON.stringify(extracted.slice(0, 500))}`);
-    return {
-      content: extracted,
-      usage: {
-        promptTokens: inputTokens,
-        completionTokens: outputTokens,
-        totalTokens: inputTokens + outputTokens,
-      },
-    };
+    if (extracted) {
+      console.warn(`[inkos] Pi-ai stream has 0 text_delta but ${thinkingContent.length} chars of thinking_delta — extracted ${extracted.length} chars as answer (thinking model)`);
+      console.warn(`[inkos] thinking_delta tail (last 800 chars): ${JSON.stringify(thinkingContent.slice(-800))}`);
+      console.warn(`[inkos] extracted preview (first 500 chars): ${JSON.stringify(extracted.slice(0, 500))}`);
+      return {
+        content: extracted,
+        usage: {
+          promptTokens: inputTokens,
+          completionTokens: outputTokens,
+          totalTokens: inputTokens + outputTokens,
+        },
+      };
+    }
+    console.warn(`[inkos] Pi-ai stream has 0 text_delta and ${thinkingContent.length} chars of thinking_delta, but no final answer could be extracted`);
   }
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;

@@ -3045,28 +3045,42 @@ ${matrix}`,
 
     const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
     let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
+    const generateFoundationMerge = (sourceText: string) => architect.generateFoundationFromImport(
+      book,
+      sourceText,
+      existingFoundationText,
+      undefined,
+      { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
+    );
     try {
-      foundation = await architect.generateFoundationFromImport(
-        book, chapterText,
-        existingFoundationText, // externalContext: full foundation for merge
-        undefined,
-        { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
-      );
+      foundation = await generateFoundationMerge(chapterText);
     } catch (error) {
-      if (!this.isProviderContentFilterError(error)) {
+      if (!this.isProviderContentFilterError(error) && !this.isArchitectMissingRequiredSectionsError(error)) {
         throw error;
       }
-      log?.warn(this.localize(language, {
-        zh: `章节 ${chapterNumber} 原文合并被上游 content_filter 拦截；改用章节分析事实包重试基础设定合并。`,
-        en: `Chapter ${chapterNumber} raw-text foundation merge was blocked by provider content_filter; retrying with the chapter analysis fact package.`,
-      }));
+      const blockedByFilter = this.isProviderContentFilterError(error);
+      log?.warn(blockedByFilter
+        ? this.localize(language, {
+            zh: `章节 ${chapterNumber} 原文合并被上游 content_filter 拦截；改用章节分析事实包重试基础设定合并。`,
+            en: `Chapter ${chapterNumber} raw-text foundation merge was blocked by provider content_filter; retrying with the chapter analysis fact package.`,
+          })
+        : this.localize(language, {
+            zh: `章节 ${chapterNumber} 基础设定合并输出缺段；改用章节分析事实包重试。`,
+            en: `Chapter ${chapterNumber} foundation merge output missed required sections; retrying with the chapter analysis fact package.`,
+          }));
       const safeChapterText = this.buildFoundationMergeFactPackage(chapterNumber, chapter.title, analysis, language);
-      foundation = await architect.generateFoundationFromImport(
-        book, safeChapterText,
-        existingFoundationText,
-        undefined,
-        { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
-      );
+      try {
+        foundation = await generateFoundationMerge(safeChapterText);
+      } catch (retryError) {
+        if (!this.isArchitectMissingRequiredSectionsError(retryError)) {
+          throw retryError;
+        }
+        log?.warn(this.localize(language, {
+          zh: `章节 ${chapterNumber} 基础设定合并重试仍缺段；跳过本章基础设定写回，保留现有基础设定。`,
+          en: `Chapter ${chapterNumber} foundation merge retry still missed required sections; skipping foundation write-back and keeping the existing foundation.`,
+        }));
+        return;
+      }
     }
 
     // Write merged foundation files. Skip runtime files (pending_hooks,
@@ -3190,6 +3204,11 @@ ${matrix}`,
   private isProviderContentFilterError(error: unknown): boolean {
     const text = error instanceof Error ? error.message : String(error);
     return /content_filter|content filter|内容审查|内容过滤/i.test(text);
+  }
+
+  private isArchitectMissingRequiredSectionsError(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error);
+    return /Architect output missing required section/i.test(text);
   }
 
   private buildFoundationMergeFactPackage(
