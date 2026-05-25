@@ -189,6 +189,10 @@ describe("chatCompletion via pi-ai", () => {
     expect(result.content).toMatch(/^=== SECTION: story_frame ===/);
     expect(result.content).not.toContain("I will now write");
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("extracted"));
+    const warningText = warn.mock.calls.flat().join("\n");
+    expect(warningText).not.toContain("thinking_delta tail");
+    expect(warningText).not.toContain("extracted preview");
+    expect(warningText).not.toContain("真实故事框架内容");
     warn.mockRestore();
   });
 

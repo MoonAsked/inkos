@@ -1956,8 +1956,6 @@ async function chatCompletionViaPiAi(
     const extracted = extractAnswerFromReasoning(thinkingContent);
     if (extracted) {
       console.warn(`[inkos] Pi-ai stream has 0 text_delta but ${thinkingContent.length} chars of thinking_delta — extracted ${extracted.length} chars as answer (thinking model)`);
-      console.warn(`[inkos] thinking_delta tail (last 800 chars): ${JSON.stringify(thinkingContent.slice(-800))}`);
-      console.warn(`[inkos] extracted preview (first 500 chars): ${JSON.stringify(extracted.slice(0, 500))}`);
       return {
         content: extracted,
         usage: {

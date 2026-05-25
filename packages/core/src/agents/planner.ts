@@ -250,7 +250,12 @@ export class PlannerAgent extends BaseAgent {
       );
 
       try {
-        return parseMemo(response.content, input.chapterNumber, input.isGoldenOpening);
+        return this.parseMemoWithProviderRecovery(
+          response.content,
+          input.chapterNumber,
+          input.isGoldenOpening,
+          input.fallbackGoal,
+        );
       } catch (error) {
         if (!(error instanceof PlannerParseError)) {
           throw error;
@@ -262,6 +267,82 @@ export class PlannerAgent extends BaseAgent {
     }
 
     throw lastError ?? new PlannerParseError("memo planner exhausted retries without a specific error");
+  }
+
+  private parseMemoWithProviderRecovery(
+    raw: string,
+    chapterNumber: number,
+    isGoldenOpening: boolean,
+    fallbackGoal: string,
+  ): ChapterMemo {
+    try {
+      return parseMemo(raw, chapterNumber, isGoldenOpening);
+    } catch (error) {
+      if (!(error instanceof PlannerParseError)) {
+        throw error;
+      }
+      const recovered = this.recoverProviderExtractedMemo(raw, chapterNumber, fallbackGoal, error.message);
+      if (!recovered) {
+        throw error;
+      }
+      return parseMemo(recovered, chapterNumber, isGoldenOpening);
+    }
+  }
+
+  private recoverProviderExtractedMemo(
+    raw: string,
+    chapterNumber: number,
+    fallbackGoal: string,
+    parseErrorMessage: string,
+  ): string | undefined {
+    const trimmed = raw.trim();
+    const safeGoal = this.truncateMemoGoal(fallbackGoal);
+
+    if (/chapter mismatch: expected \d+, got 0/.test(parseErrorMessage)) {
+      const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (!match) return undefined;
+      const yamlText = match[1]!;
+      const body = match[2]!;
+      const fixedYaml = yamlText
+        .replace(/^chapter\s*:\s*0\s*$/m, `chapter: ${chapterNumber}`)
+        .replace(/^goal\s*:\s*["']?\(auto-extracted\)["']?\s*$/m, `goal: ${JSON.stringify(safeGoal)}`);
+      return `---\n${fixedYaml}\n---\n${body}`;
+    }
+
+    if (parseErrorMessage !== "missing YAML frontmatter delimiters") {
+      return undefined;
+    }
+
+    const bodyStart = this.findPlannerMemoBodyStart(trimmed);
+    if (bodyStart < 0) {
+      return undefined;
+    }
+    const body = trimmed.slice(bodyStart).trim();
+    return [
+      "---",
+      `chapter: ${chapterNumber}`,
+      `goal: ${JSON.stringify(safeGoal)}`,
+      "threadRefs: []",
+      "---",
+      body,
+    ].join("\n");
+  }
+
+  private findPlannerMemoBodyStart(raw: string): number {
+    const headings = [
+      "## 当前任务",
+      "## Current task",
+    ];
+    const positions = headings
+      .map((heading) => raw.indexOf(heading))
+      .filter((position) => position >= 0);
+    return positions.length > 0 ? Math.min(...positions) : -1;
+  }
+
+  private truncateMemoGoal(goal: string): string {
+    const normalized = goal.replace(/\s+/g, " ").trim();
+    const fallback = normalized.length > 0 ? normalized : "Advance this chapter with clear narrative focus.";
+    return fallback.length <= 80 ? fallback : fallback.slice(0, 80);
   }
 
   private isGoldenOpeningChapter(language: string | undefined, chapterNumber: number): boolean {
