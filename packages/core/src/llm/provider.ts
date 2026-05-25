@@ -763,54 +763,99 @@ function extractAnswerFromReasoning(text: string): string {
   // first marker to the end of the text, skipping the preceding reasoning noise.
   // Note: threshold lowered from 2 to 1 because thinking models in retry scenarios
   // may output only one section before exhausting their token budget.
+  //
+  // IMPORTANT: We must distinguish between actual section output and reasoning
+  // that merely *references* section markers (e.g. "You must output === SECTION: story_frame ===").
+  // We do this by requiring markers to be on their own line and checking that at
+  // least one section has substantive content (not just reasoning/discussion text).
   {
-    const sectionMarkerPattern = /===\s*SECTION\s*[：:]\s*[^\n=]+?\s*===/gi;
-    const markerMatches = [...text.matchAll(sectionMarkerPattern)];
+    // Use a stricter pattern: marker must be on its own line (preceded by
+    // line-start or newline, followed by newline or end-of-text).
+    // This avoids matching inline references like:
+    //   "Output `=== SECTION: story_frame ===`, `=== SECTION: volume_map ===`"
+    const sectionMarkerLinePattern = /(?:^|\n)\s*(===\s*SECTION\s*[：:]\s*[^\n=]+?\s*===)\s*(?:\n|$)/gi;
+    const markerMatches = [...text.matchAll(sectionMarkerLinePattern)];
     if (markerMatches.length >= 1) {
-      const firstMarkerPos = markerMatches[0]!.index!;
-      let extracted = text.slice(firstMarkerPos);
-      // Strip common leading indentation (thinking models often indent the answer)
-      const lines = extracted.split("\n");
-      const minIndent = lines.reduce((min, line) => {
-        if (line.trim() === "") return min;
-        const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0;
-        return Math.min(min, indent);
-      }, Infinity);
-      if (minIndent > 0 && minIndent < Infinity) {
-        extracted = lines.map(l => l.trim() === "" ? "" : l.slice(minIndent)).join("\n");
-      }
-      // Strip thinking model artifacts (code blocks wrapping the answer, italicized headings)
-      extracted = stripThinkingModelArtifacts(extracted);
-
-      // Post-extraction salvage: if the extracted content has no === SECTION: roles ===
-      // but the original thinking text contains ---ROLE--- blocks, the thinking model
-      // likely put role cards in its reasoning without a proper section header, or the
-      // roles section was truncated. Scan the full thinking text for orphaned ---ROLE---
-      // blocks and synthesize a === SECTION: roles === block.
-      const hasRolesSection = /===\s*SECTION\s*[：:]\s*roles\s*===/i.test(extracted);
-      if (!hasRolesSection) {
-        const roleBlockPattern = /^---ROLE---$/gm;
-        const roleMatches = [...text.matchAll(roleBlockPattern)];
-        if (roleMatches.length >= 1) {
-          // Collect valid ---ROLE--- blocks (must have ---CONTENT---, tier, and name)
-          const validRoleBlocks: string[] = [];
-          for (let i = 0; i < roleMatches.length; i++) {
-            const start = roleMatches[i]!.index! + roleMatches[i]![0].length;
-            const end = roleMatches[i + 1]?.index ?? text.length;
-            const block = text.slice(start, end).trim();
-            if (block.includes("---CONTENT---")
-              && /tier\s*[:：]\s*(major|minor|主要|次要)/i.test(block)
-              && /name\s*[:：]/i.test(block)) {
-              validRoleBlocks.push(`---ROLE---\n${block}`);
-            }
-          }
-          if (validRoleBlocks.length > 0) {
-            extracted += "\n\n=== SECTION: roles ===\n" + validRoleBlocks.join("\n\n");
-          }
+      // Find the first marker that starts a block with actual content.
+      // A marker is "real" if the text between it and the next marker (or end)
+      // contains at least 50 chars of non-reasoning content.
+      let bestStart = -1;
+      for (let i = 0; i < markerMatches.length; i++) {
+        const match = markerMatches[i]!;
+        // The captured group (1) is the === SECTION: ... === text
+        const markerEnd = (match.index ?? 0) + match[0]!.length;
+        const nextMarkerStart = markerMatches[i + 1]?.index ?? text.length;
+        const contentBetween = text.slice(markerEnd, nextMarkerStart).trim();
+        // Check if this content looks like actual section content rather than
+        // reasoning discussion. Real content typically has prose paragraphs,
+        // markdown headings (##), role blocks (---ROLE---), or YAML.
+        // Reasoning discussion typically has bullet points (*, -), backtick
+        // references, or very short fragments.
+        const nonReasoningLines = contentBetween.split("\n").filter(line => {
+          const trimmed = line.trim();
+          if (!trimmed) return false;
+          // Skip lines that look like reasoning: bullet points with backticks,
+          // constraint descriptions, etc.
+          if (/^\*\s/.test(trimmed) && /`===\s*SECTION/.test(trimmed)) return false;
+          if (/^[-*]\s/.test(trimmed) && trimmed.length < 80) return false;
+          // Keep lines that look like actual content: prose, headings, YAML, role blocks
+          return true;
+        });
+        const nonReasoningChars = nonReasoningLines.reduce((sum, l) => sum + l.length, 0);
+        if (nonReasoningChars >= 50) {
+          // This marker has real content after it
+          bestStart = match.index ?? 0;
+          break;
         }
       }
 
-      return extracted;
+      if (bestStart >= 0) {
+        let extracted = text.slice(bestStart);
+        // Strip common leading indentation (thinking models often indent the answer)
+        const lines = extracted.split("\n");
+        const minIndent = lines.reduce((min, line) => {
+          if (line.trim() === "") return min;
+          const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0;
+          return Math.min(min, indent);
+        }, Infinity);
+        if (minIndent > 0 && minIndent < Infinity) {
+          extracted = lines.map(l => l.trim() === "" ? "" : l.slice(minIndent)).join("\n");
+        }
+        // Strip thinking model artifacts (code blocks wrapping the answer, italicized headings)
+        extracted = stripThinkingModelArtifacts(extracted);
+
+        // Post-extraction salvage: if the extracted content has no === SECTION: roles ===
+        // but the original thinking text contains ---ROLE--- blocks, the thinking model
+        // likely put role cards in its reasoning without a proper section header, or the
+        // roles section was truncated. Scan the full thinking text for orphaned ---ROLE---
+        // blocks and synthesize a === SECTION: roles === block.
+        const hasRolesSection = /===\s*SECTION\s*[：:]\s*roles\s*===/i.test(extracted);
+        if (!hasRolesSection) {
+          const roleBlockPattern = /^---ROLE---$/gm;
+          const roleMatches = [...text.matchAll(roleBlockPattern)];
+          if (roleMatches.length >= 1) {
+            // Collect valid ---ROLE--- blocks (must have ---CONTENT---, tier, and name)
+            const validRoleBlocks: string[] = [];
+            for (let i = 0; i < roleMatches.length; i++) {
+              const start = roleMatches[i]!.index! + roleMatches[i]![0].length;
+              const end = roleMatches[i + 1]?.index ?? text.length;
+              const block = text.slice(start, end).trim();
+              if (block.includes("---CONTENT---")
+                && /tier\s*[:：]\s*(major|minor|主要|次要)/i.test(block)
+                && /name\s*[:：]/i.test(block)) {
+                validRoleBlocks.push(`---ROLE---\n${block}`);
+              }
+            }
+            if (validRoleBlocks.length > 0) {
+              extracted += "\n\n=== SECTION: roles ===\n" + validRoleBlocks.join("\n\n");
+            }
+          }
+        }
+
+        return extracted;
+      }
+      // All markers were in reasoning context (no real content after any of them).
+      // Fall through to other strategies rather than returning garbage.
     }
   }
 

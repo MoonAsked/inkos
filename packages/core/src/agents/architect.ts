@@ -207,7 +207,8 @@ export class ArchitectAgent extends BaseAgent {
       const extractedChars = [...currentSections.values()].reduce((sum, s) => sum + s.length, 0);
       if (response.content.length > 10_000 && extractedChars < response.content.length * 0.1) {
         this.log?.warn(`[architect] Response has ${response.content.length} chars but only ${extractedChars} chars of sections — using reconstructed sections as assistant content for retry`);
-        lastResponseContent = this.reconstructFromSections(currentSections);
+        const reconstructed = this.reconstructFromSections(accumulatedSections);
+        lastResponseContent = reconstructed || response.content.slice(0, 2000);
       } else {
         lastResponseContent = response.content;
       }
@@ -1445,7 +1446,10 @@ name: <角色名>
       const extractedChars = [...currentSections.values()].reduce((sum, s) => sum + s.length, 0);
       if (response.content.length > 10_000 && extractedChars < response.content.length * 0.1) {
         this.log?.warn(`[architect] Response has ${response.content.length} chars but only ${extractedChars} chars of sections — using reconstructed sections as assistant content for retry`);
-        lastResponseContent = this.reconstructFromSections(currentSections);
+        // Use accumulatedSections (cross-attempt) rather than currentSections (this attempt only)
+        // so the assistant message reflects all progress so far, not just this failed attempt.
+        const reconstructed = this.reconstructFromSections(accumulatedSections);
+        lastResponseContent = reconstructed || response.content.slice(0, 2000);
       } else {
         lastResponseContent = response.content;
       }
