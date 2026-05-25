@@ -251,6 +251,46 @@ describe("PlannerAgent.planChapter memo generation", () => {
     expect(result.memo.body).toContain("## 不要做\n无");
   });
 
+  it("recovers a memo that omitted both hook ledger and do-not sections", async () => {
+    // Simulate thinking model truncation: both trailing sections missing
+    const bodyWithoutTrailing = VALID_BODY.replace(/\n\n## 本章 hook 账\n[\s\S]*$/, "");
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `---\nchapter: 576\ngoal: 高买瓢把子后局势急转\nthreadRefs: []\n---\n${bodyWithoutTrailing}\n`,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 576,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(576);
+    expect(result.memo.body).toContain("## 本章 hook 账");
+    expect(result.memo.body).toContain("## 不要做\n无");
+  });
+
+  it("recovers a memo that omitted only the hook ledger section", async () => {
+    // Simulate thinking model truncation: hook ledger missing but do-not present
+    const bodyWithoutHookLedger = VALID_BODY.replace(/\n\n## 本章 hook 账\n[\s\S]*?## 不要做/, "## 不要做");
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `---\nchapter: 577\ngoal: 推进暗线收束\nthreadRefs: []\n---\n${bodyWithoutHookLedger}\n`,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 577,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(577);
+    expect(result.memo.body).toContain("## 本章 hook 账");
+    expect(result.memo.body).toContain("## 不要做");
+  });
+
   // Phase hotfix 4: English books must receive English system + user prompts
   // and English golden-opening guidance for chapters ≤ 3.
   it("uses English prompts end-to-end when book.language is en", async () => {

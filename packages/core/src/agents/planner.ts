@@ -309,13 +309,43 @@ export class PlannerAgent extends BaseAgent {
       return `---\n${fixedYaml}\n---\n${body}`;
     }
 
-    if (parseErrorMessage === "missing sections: ## 不要做") {
-      const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
-      if (!match) return undefined;
-      const yamlText = match[1]!;
-      const body = match[2]!.trimEnd();
-      const doNotHeading = body.includes("## Current task") ? "## Do not\nNone." : "## 不要做\n无";
-      return `---\n${yamlText}\n---\n${body}\n\n${doNotHeading}\n`;
+    // Recover when the LLM truncated trailing sections (common with thinking
+    // models that exhaust their token budget). We auto-append default content
+    // for any combination of missing "## 本章 hook 账" and "## 不要做" —
+    // these are the two most frequently truncated sections because they sit
+    // at the end of the memo body.
+    const missingMatch = parseErrorMessage.match(/^missing sections: (.+)$/);
+    if (missingMatch) {
+      const missingList = missingMatch[1]!.split(", ").map((s) => s.trim());
+      const recoverable = ["## 本章 hook 账", "## 不要做"];
+      const isEnglish = trimmed.includes("## Current task");
+      const recoverableEn = ["## Hook ledger for this chapter", "## Do not"];
+      // Only recover if every missing section is one we can auto-fill
+      const allRecoverable = missingList.every(
+        (s) => recoverable.includes(s) || recoverableEn.includes(s),
+      );
+      if (allRecoverable) {
+        const fmMatch = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+        if (fmMatch) {
+          const yamlText = fmMatch[1]!;
+          let body = fmMatch[2]!.trimEnd();
+          const needsHookLedger = missingList.includes("## 本章 hook 账")
+            || missingList.includes("## Hook ledger for this chapter");
+          const needsDoNot = missingList.includes("## 不要做")
+            || missingList.includes("## Do not");
+          if (needsHookLedger) {
+            const hookLedgerSection = isEnglish
+              ? "## Hook ledger for this chapter\nopen:\n- (none)\nadvance:\n- (none)\nresolve:\n- (none)\ndefer:\n- (none)"
+              : "## 本章 hook 账\nopen:\n- 无\nadvance:\n- 无\nresolve:\n- 无\ndefer:\n- 无";
+            body += `\n\n${hookLedgerSection}`;
+          }
+          if (needsDoNot) {
+            const doNotSection = isEnglish ? "## Do not\nNone." : "## 不要做\n无";
+            body += `\n\n${doNotSection}`;
+          }
+          return `---\n${yamlText}\n---\n${body}\n`;
+        }
+      }
     }
 
     if (parseErrorMessage !== "missing YAML frontmatter delimiters") {
