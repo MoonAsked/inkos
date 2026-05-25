@@ -3337,6 +3337,95 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("retries per-chapter foundation merge with analysis facts when raw text hits content_filter", async () => {
+    const { logger, warnings } = createCaptureLogger();
+    const { root, runner, state, bookId } = await createRunnerFixture({ logger });
+    const bookDir = state.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const outlineDir = join(storyDir, "outline");
+
+    await mkdir(outlineDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), "---\nversion: \"1.0\"\n---\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 546,
+        location: "Quyang",
+        protagonistState: "Yang Luo is handling the aftermath.",
+        goal: "Keep control of the situation.",
+        conflict: "City bureau pressure is rising.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(outlineDir, "story_frame.md"), "# Story Frame\n", "utf-8"),
+      writeFile(join(outlineDir, "volume_map.md"), "# Volume Map\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [
+      {
+        number: 546,
+        title: "Previous",
+        status: "imported",
+        wordCount: 10,
+        createdAt: "2026-03-22T00:00:00.000Z",
+        updatedAt: "2026-03-22T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+
+    const foundation = vi.spyOn(ArchitectAgent.prototype, "generateFoundationFromImport")
+      .mockRejectedValueOnce(new Error("Provider finish_reason: content_filter"))
+      .mockResolvedValueOnce({
+        storyBible: "",
+        volumeOutline: "",
+        storyFrame: "# Story Frame\n\nMerged from safe facts.\n",
+        volumeMap: "# Volume Map\n\nMerged chapter 1.\n",
+        bookRules: "",
+        currentState: "",
+        pendingHooks: "",
+        roles: [
+          { tier: "major", name: "杨洛", content: "# 杨洛\n\nMerged role state.\n" },
+        ],
+      });
+    const chapterContent = "章节正文。".repeat(20);
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        chapterNumber: 1,
+        title: "实在是高",
+        content: chapterContent,
+        wordCount: chapterContent.length,
+        updatedState: createStateCard({
+          chapter: 1,
+          location: "Quyang",
+          protagonistState: "Yang Luo is handling the aftermath.",
+          goal: "Keep control of the situation.",
+          conflict: "City bureau pressure is rising.",
+        }),
+      }),
+    );
+    vi.spyOn(WriterAgent.prototype, "saveChapter").mockResolvedValue(undefined);
+    vi.spyOn(WriterAgent.prototype, "saveNewTruthFiles").mockResolvedValue(undefined);
+
+    try {
+      const result = await runner.importChapters({
+        bookId,
+        foundationInterval: 1,
+        chapters: [
+          { title: "实在是高", content: chapterContent },
+        ],
+      });
+
+      expect(result.importedCount).toBe(1);
+      expect((await state.loadChapterIndex(bookId)).some((entry) => entry.title === "实在是高")).toBe(true);
+      expect(foundation).toHaveBeenCalledTimes(2);
+      expect(foundation.mock.calls[1]?.[1]).toContain("CHAPTER_ANALYSIS_SAFE_PACKAGE");
+      await expect(readFile(join(outlineDir, "story_frame.md"), "utf-8")).resolves.toContain("Merged from safe facts");
+      expect(warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining("content_filter"),
+      ]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   sqliteIt("rebuilds fact history from imported chapter snapshots", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
 

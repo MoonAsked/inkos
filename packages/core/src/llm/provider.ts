@@ -403,6 +403,11 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
         else if (b.reason) detail = b.reason;
       }
     }
+    // Also include the raw error message when upstream detail not available
+    if (!detail && typeof error === "object" && error !== null) {
+      const errMsg = (error as { message?: string }).message;
+      if (errMsg && !errMsg.startsWith("API 返回")) detail = errMsg;
+    }
     return new Error(
       `API 返回 400（请求参数错误）。${detail ? `上游详情：${detail}。\n` : ""}` +
       `常见原因：\n` +

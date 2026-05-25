@@ -2681,6 +2681,14 @@ ${matrix}`,
             const isEmptyResponse = errMsg.includes("empty response");
             const isTerminated = errMsg.includes("terminated");
             const isRateLimited = errMsg.includes("429") || errMsg.includes("rate limit");
+            const isBadRequest = errMsg.includes("400") || errMsg.includes("请求参数错误");
+            if (isBadRequest) {
+              log?.error(this.localize(resolvedLanguage, {
+                zh: `章节 ${chapterNumber} 分析API参数错误(400)，这是不可重试配置错误，已停止重试。`,
+                en: `Chapter ${chapterNumber} analysis hit bad request (400), a non-retryable configuration error; stopping retries.`,
+              }));
+              throw analyzeError;
+            }
             if ((isEmptyResponse || isTerminated || isRateLimited) && analyzeAttempt < maxAnalyzeRetries) {
               const reason = isRateLimited ? "请求过多(429)" : isTerminated ? "连接被终止" : "返回空响应";
               const reasonEn = isRateLimited ? "rate limited (429)" : isTerminated ? "connection terminated" : "returned empty response";
@@ -2754,7 +2762,7 @@ ${matrix}`,
         const fi = input.foundationInterval ?? 0;
         if (fi > 0 && (chapterNumber % fi === 0 || i === input.chapters.length - 1)) {
           await this.mergeChapterIntoFoundation(
-            input.bookId, book, bookDir, ch, chapterNumber,
+            input.bookId, book, bookDir, ch, output, chapterNumber,
             gp.numericalSystem, resolvedLanguage,
             input.importMode === "series" ? "series" : undefined,
           );
@@ -2977,6 +2985,7 @@ ${matrix}`,
     book: BookConfig,
     bookDir: string,
     chapter: { readonly title: string; readonly content: string },
+    analysis: WriteChapterOutput,
     chapterNumber: number,
     _numericalSystem: boolean,
     language: LengthLanguage,
@@ -3035,12 +3044,30 @@ ${matrix}`,
       : "";
 
     const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
-    const foundation = await architect.generateFoundationFromImport(
-      book, chapterText,
-      existingFoundationText, // externalContext: full foundation for merge
-      undefined,
-      { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
-    );
+    let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
+    try {
+      foundation = await architect.generateFoundationFromImport(
+        book, chapterText,
+        existingFoundationText, // externalContext: full foundation for merge
+        undefined,
+        { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
+      );
+    } catch (error) {
+      if (!this.isProviderContentFilterError(error)) {
+        throw error;
+      }
+      log?.warn(this.localize(language, {
+        zh: `章节 ${chapterNumber} 原文合并被上游 content_filter 拦截；改用章节分析事实包重试基础设定合并。`,
+        en: `Chapter ${chapterNumber} raw-text foundation merge was blocked by provider content_filter; retrying with the chapter analysis fact package.`,
+      }));
+      const safeChapterText = this.buildFoundationMergeFactPackage(chapterNumber, chapter.title, analysis, language);
+      foundation = await architect.generateFoundationFromImport(
+        book, safeChapterText,
+        existingFoundationText,
+        undefined,
+        { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
+      );
+    }
 
     // Write merged foundation files. Skip runtime files (pending_hooks,
     // current_state) — they are maintained by the step 2 analysis.
@@ -3158,6 +3185,72 @@ ${matrix}`,
       zh: `基础设定已合并（story_frame=${frameLen}ch, volume_map=${vmapLen}ch, roles=${roleCount}个）`,
       en: `Foundation merged (story_frame=${frameLen}ch, volume_map=${vmapLen}ch, roles=${roleCount})`,
     }));
+  }
+
+  private isProviderContentFilterError(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error);
+    return /content_filter|content filter|内容审查|内容过滤/i.test(text);
+  }
+
+  private buildFoundationMergeFactPackage(
+    chapterNumber: number,
+    chapterTitle: string,
+    analysis: WriteChapterOutput,
+    language: LengthLanguage,
+  ): string {
+    if (language === "en") {
+      return [
+        `CHAPTER_ANALYSIS_SAFE_PACKAGE`,
+        `Chapter: ${chapterNumber}`,
+        `Title: ${analysis.title || chapterTitle}`,
+        "",
+        "Use this analyzed fact package to merge the foundation. The original prose is omitted because the provider blocked raw-text processing. Do not treat omitted prose as absent canon; rely on the extracted state, summaries, hooks, subplots, emotional arcs, and character matrix below.",
+        "",
+        "## Chapter Summary",
+        analysis.chapterSummary || "(not provided)",
+        "",
+        "## Updated State",
+        analysis.updatedState || "(not provided)",
+        "",
+        "## Updated Hooks",
+        analysis.updatedHooks || "(not provided)",
+        "",
+        "## Updated Subplots",
+        analysis.updatedSubplots || "(not provided)",
+        "",
+        "## Updated Emotional Arcs",
+        analysis.updatedEmotionalArcs || "(not provided)",
+        "",
+        "## Updated Character Matrix",
+        analysis.updatedCharacterMatrix || "(not provided)",
+      ].join("\n");
+    }
+
+    return [
+      "CHAPTER_ANALYSIS_SAFE_PACKAGE",
+      `章节：${chapterNumber}`,
+      `标题：${analysis.title || chapterTitle}`,
+      "",
+      "请使用这份已分析事实包合并基础设定。原始正文因上游拦截不再发送；不要把原文省略理解为正史缺失，请以下方提取出的状态、摘要、伏笔、支线、情感弧线、角色矩阵为准。",
+      "",
+      "## 本章摘要",
+      analysis.chapterSummary || "（未提供）",
+      "",
+      "## 更新后状态",
+      analysis.updatedState || "（未提供）",
+      "",
+      "## 更新后伏笔",
+      analysis.updatedHooks || "（未提供）",
+      "",
+      "## 更新后支线",
+      analysis.updatedSubplots || "（未提供）",
+      "",
+      "## 更新后情感弧线",
+      analysis.updatedEmotionalArcs || "（未提供）",
+      "",
+      "## 更新后角色矩阵",
+      analysis.updatedCharacterMatrix || "（未提供）",
+    ].join("\n");
   }
 
   private async normalizeDraftLengthIfNeeded(params: {
