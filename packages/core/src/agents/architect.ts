@@ -193,6 +193,15 @@ export class ArchitectAgent extends BaseAgent {
         if (content.trim()) accumulatedSections.set(name, content);
       }
 
+      // Salvage orphaned ---ROLE--- blocks from thinking model output.
+      if (!accumulatedSections.get("roles")?.trim()) {
+        const orphanedRoles = this.extractOrphanedRoles(response.content, accumulatedSections.get("roles"));
+        if (orphanedRoles) {
+          accumulatedSections.set("roles", orphanedRoles);
+          this.log?.info(`[architect] Salvaged ${orphanedRoles.length} chars of orphaned roles from thinking model output`);
+        }
+      }
+
       // Determine lastResponseContent for the next retry's assistant message.
       // Same reasoning-noise protection as generateFoundationFromImport.
       const extractedChars = [...currentSections.values()].reduce((sum, s) => sum + s.length, 0);
@@ -1416,6 +1425,17 @@ name: <角色名>
         }
       }
 
+      // Salvage orphaned ---ROLE--- blocks from thinking model output.
+      // Thinking models may put role cards in reasoning_content without a
+      // proper === SECTION: roles === header, or the section may be truncated.
+      if (!accumulatedSections.get("roles")?.trim()) {
+        const orphanedRoles = this.extractOrphanedRoles(response.content, accumulatedSections.get("roles"));
+        if (orphanedRoles) {
+          accumulatedSections.set("roles", orphanedRoles);
+          this.log?.info(`[architect] Salvaged ${orphanedRoles.length} chars of orphaned roles from thinking model output`);
+        }
+      }
+
       // Determine lastResponseContent for the next retry's assistant message.
       // If the response is very long but only yielded a small amount of section content,
       // it likely contains reasoning/thinking noise. Using the raw response as the
@@ -1466,6 +1486,55 @@ name: <角色名>
       }
     }
     throw new Error("Unexpected: generateFoundationFromImport retry loop exited without result");
+  }
+
+  /**
+   * Extract orphaned ---ROLE--- blocks from raw LLM output that were not
+   * captured inside any === SECTION: roles === block. This happens when
+   * thinking models put role cards in their reasoning_content but either
+   * omit the === SECTION: roles === header or the section gets truncated.
+   *
+   * Returns the concatenated role-card text (including ---ROLE--- delimiters)
+   * if any orphaned blocks are found, or undefined if none.
+   */
+  private extractOrphanedRoles(rawContent: string, alreadyCapturedRoles: string | undefined): string | undefined {
+    // If we already have a non-empty roles section, no need to salvage.
+    if (alreadyCapturedRoles?.trim()) return undefined;
+
+    // Split the raw content by ---ROLE--- delimiters.
+    // We look for the pattern at the start of a line (possibly with leading whitespace).
+    const roleBlockPattern = /^---ROLE---$/gm;
+    const splits: string[] = [];
+    let lastEnd = 0;
+    for (const match of rawContent.matchAll(roleBlockPattern)) {
+      if (lastEnd > 0 || match.index! > 0) {
+        splits.push(rawContent.slice(lastEnd, match.index));
+      }
+      lastEnd = match.index! + match[0].length;
+    }
+    if (lastEnd < rawContent.length) {
+      splits.push(rawContent.slice(lastEnd));
+    }
+
+    // Collect blocks that contain ---CONTENT--- (valid role cards)
+    const validBlocks: string[] = [];
+    for (let i = 1; i < splits.length; i++) {
+      const block = splits[i]!;
+      if (block.includes("---CONTENT---")) {
+        // Check that this block is NOT inside an already-parsed === SECTION: === block
+        // by verifying it has tier and name fields
+        const hasTier = /tier\s*[:：]\s*(major|minor|主要|次要)/i.test(block);
+        const hasName = /name\s*[:：]/i.test(block);
+        if (hasTier && hasName) {
+          validBlocks.push(block.trim());
+        }
+      }
+    }
+
+    if (validBlocks.length === 0) return undefined;
+
+    this.log?.info(`[architect] extractOrphanedRoles: found ${validBlocks.length} orphaned ---ROLE--- blocks in raw LLM output`);
+    return validBlocks.map(b => `---ROLE---\n${b}`).join("\n\n");
   }
 
   /** Reconstruct a full section-delimited string from a map of section name → content. */

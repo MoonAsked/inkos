@@ -781,6 +781,35 @@ function extractAnswerFromReasoning(text: string): string {
       }
       // Strip thinking model artifacts (code blocks wrapping the answer, italicized headings)
       extracted = stripThinkingModelArtifacts(extracted);
+
+      // Post-extraction salvage: if the extracted content has no === SECTION: roles ===
+      // but the original thinking text contains ---ROLE--- blocks, the thinking model
+      // likely put role cards in its reasoning without a proper section header, or the
+      // roles section was truncated. Scan the full thinking text for orphaned ---ROLE---
+      // blocks and synthesize a === SECTION: roles === block.
+      const hasRolesSection = /===\s*SECTION\s*[：:]\s*roles\s*===/i.test(extracted);
+      if (!hasRolesSection) {
+        const roleBlockPattern = /^---ROLE---$/gm;
+        const roleMatches = [...text.matchAll(roleBlockPattern)];
+        if (roleMatches.length >= 1) {
+          // Collect valid ---ROLE--- blocks (must have ---CONTENT---, tier, and name)
+          const validRoleBlocks: string[] = [];
+          for (let i = 0; i < roleMatches.length; i++) {
+            const start = roleMatches[i]!.index! + roleMatches[i]![0].length;
+            const end = roleMatches[i + 1]?.index ?? text.length;
+            const block = text.slice(start, end).trim();
+            if (block.includes("---CONTENT---")
+              && /tier\s*[:：]\s*(major|minor|主要|次要)/i.test(block)
+              && /name\s*[:：]/i.test(block)) {
+              validRoleBlocks.push(`---ROLE---\n${block}`);
+            }
+          }
+          if (validRoleBlocks.length > 0) {
+            extracted += "\n\n=== SECTION: roles ===\n" + validRoleBlocks.join("\n\n");
+          }
+        }
+      }
+
       return extracted;
     }
   }
