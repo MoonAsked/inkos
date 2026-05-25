@@ -83,7 +83,7 @@ const endpointIdsByGroup = {
     "minimax", "moonshot", "sensenova", "sensenova_2", "spark", "stepfun", "tencentcloud",
     "volcengine", "wenxin", "xiaomimimo", "zeroone", "zhipu",
   ],
-  aggregator: ["giteeai", "infiniai", "modelscope", "newapi", "openrouter", "ppio", "qiniu", "siliconcloud"],
+  aggregator: ["giteeai", "infiniai", "modelscope", "newapi", "opencode", "openrouter", "ppio", "qiniu", "siliconcloud"],
   local: ["githubCopilot", "ollama"],
   codingPlan: [
     "astronCodingPlan", "bailianCodingPlan", "glmCodingPlan", "kimiCodingPlan", "kimicode",
@@ -724,11 +724,11 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { services: Array<{ service: string; group?: string; connected: boolean }> };
     const bank = body.services.filter((s) => !s.service.startsWith("custom"));
-    expect(bank.length).toBe(43);
+    expect(bank.length).toBe(44);
     expect(bank.every((s) => typeof s.group === "string")).toBe(true);
     expect(bank.filter((s) => s.group === "overseas")).toHaveLength(6);
     expect(bank.filter((s) => s.group === "china")).toHaveLength(19);
-    expect(bank.filter((s) => s.group === "aggregator")).toHaveLength(8);
+    expect(bank.filter((s) => s.group === "aggregator")).toHaveLength(9);
     expect(bank.filter((s) => s.group === "local")).toHaveLength(2);
     expect(bank.filter((s) => s.group === "codingPlan")).toHaveLength(8);
     expect(body.services.find((s) => s.service === "moonshot")?.connected).toBe(true);
