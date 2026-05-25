@@ -170,7 +170,7 @@ async function loadLegacyIntentPlan(
     intent,
     memo: {
       chapter: chapterNumber,
-      goal: goal.slice(0, 50),
+      goal: goal.slice(0, 80),
       isGoldenOpening: false,
       body: intentMarkdown,
       threadRefs: [],

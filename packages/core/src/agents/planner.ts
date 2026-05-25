@@ -147,7 +147,7 @@ export class PlannerAgent extends BaseAgent {
       language: input.book.language ?? "zh",
     });
 
-    // memo.goal is LLM-produced and specific (<=50 chars, validated).
+    // memo.goal is LLM-produced and specific (<=80 chars, validated).
     // Overwrite intent.goal so downstream composer/retrieval gets the
     // concrete task statement instead of the outline-derived fallback.
     intent.goal = memo.goal;

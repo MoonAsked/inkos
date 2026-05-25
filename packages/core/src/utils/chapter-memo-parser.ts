@@ -66,7 +66,7 @@ function extractSectionContent(body: string, heading: string): string {
  * markdown body containing the seven required section headings.
  *
  * Strict on core fields (chapter integer + matches expected, goal non-empty
- * and ≤ 50 chars, required section headings present). Lenient on aux fields
+ * and ≤ 80 chars, required section headings present). Lenient on aux fields
  * (threadRefs coerced to string[], defaults to []).
  *
  * `isGoldenOpening` is authoritative from the caller — any value the LLM
@@ -110,9 +110,9 @@ export function parseMemo(
   if (typeof f.goal !== "string" || f.goal.length === 0) {
     throw new PlannerParseError("goal must be a non-empty string");
   }
-  if (f.goal.length > 50) {
+  if (f.goal.length > 80) {
     throw new PlannerParseError(
-      `goal too long: ${f.goal.length} chars (max 50)`,
+      `goal too long: ${f.goal.length} chars (max 80)`,
     );
   }
 
