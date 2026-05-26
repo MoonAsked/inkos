@@ -3045,13 +3045,34 @@ ${matrix}`,
 
     const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
     let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
-    const generateFoundationMerge = (sourceText: string) => architect.generateFoundationFromImport(
+    const generateFoundationMergeRaw = (sourceText: string) => architect.generateFoundationFromImport(
       book,
       sourceText,
       existingFoundationText,
       undefined,
       { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
     );
+    // Wrap with empty-response retry for thinking/reasoning models that put all
+    // output in thinking_delta but extractAnswerFromReasoning fails to recover.
+    const maxFoundationMergeRetries = 3;
+    const generateFoundationMerge = async (sourceText: string) => {
+      for (let attempt = 0; attempt < maxFoundationMergeRetries; attempt++) {
+        try {
+          return await generateFoundationMergeRaw(sourceText);
+        } catch (error: any) {
+          const errMsg = error?.message ?? "";
+          if (errMsg.includes("empty response") && attempt < maxFoundationMergeRetries - 1) {
+            log?.warn(this.localize(language, {
+              zh: `章节 ${chapterNumber} 基础设定合并返回空响应（第${attempt + 1}次），重试中...`,
+              en: `Chapter ${chapterNumber} foundation merge returned empty response (attempt ${attempt + 1}), retrying...`,
+            }));
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw new Error("Unexpected: generateFoundationMerge retry loop exited without result");
+    };
     try {
       foundation = await generateFoundationMerge(chapterText);
     } catch (error) {

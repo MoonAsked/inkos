@@ -1417,7 +1417,20 @@ name: <角色名>
         messages.push({ role: "user", content: continuationPrompt });
       }
 
-      const response = await this.chat(messages, { maxTokens: importMaxTokens, temperature: 0.5 });
+      let response: { content: string };
+      try {
+        response = await this.chat(messages, { maxTokens: importMaxTokens, temperature: 0.5 });
+      } catch (chatError: any) {
+        // Retry on empty LLM response (common with thinking/reasoning models
+        // that put all output in thinking_delta but extractAnswerFromReasoning
+        // fails to recover the structured content).
+        const errMsg = chatError?.message ?? "";
+        if (errMsg.includes("empty response") && attempt < maxParseRetries) {
+          this.log?.warn(`[architect] generateFoundationFromImport: LLM returned empty response (attempt ${attempt + 1}/${maxParseRetries + 1}), retrying...`);
+          continue;
+        }
+        throw chatError;
+      }
       this.log?.debug(`[architect] generateFoundationFromImport: LLM response received, ${response.content.length} chars`);
 
       // Merge sections from this response into accumulatedSections
