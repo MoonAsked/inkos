@@ -803,6 +803,25 @@ function isRecognizedReasoningSectionName(name: string): boolean {
   return REASONING_SECTION_NAMES.has(normalizeReasoningSectionName(name));
 }
 
+/** Writer/chapter-analyzer TAG names used in === TAG === delimiters. */
+const WRITER_TAG_NAMES = new Set([
+  "CHAPTER_TITLE",
+  "CHAPTER_CONTENT",
+  "PRE_WRITE_CHECK",
+  "POST_SETTLEMENT",
+  "UPDATED_STATE",
+  "UPDATED_LEDGER",
+  "UPDATED_HOOKS",
+  "CHAPTER_SUMMARY",
+  "UPDATED_SUBPLOTS",
+  "UPDATED_EMOTIONAL_ARCS",
+  "UPDATED_CHARACTER_MATRIX",
+]);
+
+function isRecognizedWriterTagName(name: string): boolean {
+  return WRITER_TAG_NAMES.has(name);
+}
+
 function extractAnswerFromReasoning(text: string): string | undefined {
   // Strategy 0: === SECTION: name === markers (architect / foundation output)
   // Thinking models may put the entire structured output inside reasoning_content.
@@ -914,6 +933,67 @@ function extractAnswerFromReasoning(text: string): string | undefined {
       }
       // All markers were in reasoning context (no real content after any of them).
       // Fall through to other strategies rather than returning garbage.
+    }
+  }
+
+  // Strategy 0b: === TAG === markers (chapter-analyzer / writer output)
+  // Thinking models may put the entire structured output inside reasoning_content.
+  // The chapter-analyzer and writer agents use === CHAPTER_TITLE ===,
+  // === UPDATED_STATE ===, etc. as structural markers. If we find at least 1
+  // such marker with substantive content after it, extract from the first marker
+  // to the end of the text, skipping the preceding reasoning noise.
+  {
+    const tagMarkerLinePattern = /(?:^|\n)[ \t]*(===\s*([A-Z][A-Z0-9_]*)\s*===)[ \t]*(?:\n|$)/g;
+    const tagMarkerMatches = [...text.matchAll(tagMarkerLinePattern)]
+      .map((match) => {
+        const fullMatch = match[0] ?? "";
+        const marker = match[1] ?? "";
+        const rawName = match[2] ?? "";
+        const markerOffset = fullMatch.indexOf(marker);
+        const start = (match.index ?? 0) + (markerOffset >= 0 ? markerOffset : 0);
+        const contentStart = (match.index ?? 0) + fullMatch.length;
+        return { rawName, start, contentStart };
+      })
+      .filter(({ rawName }) => isRecognizedWriterTagName(rawName));
+    if (tagMarkerMatches.length >= 1) {
+      // Find the first marker that starts a block with actual content.
+      let bestStart = -1;
+      for (let i = 0; i < tagMarkerMatches.length; i++) {
+        const marker = tagMarkerMatches[i]!;
+        const nextMarkerStart = tagMarkerMatches[i + 1]?.start ?? text.length;
+        const contentBetween = text.slice(marker.contentStart, nextMarkerStart).trim();
+        // Check if this content looks like actual output rather than reasoning.
+        const nonReasoningLines = contentBetween.split("\n").filter(line => {
+          const trimmed = line.trim();
+          if (!trimmed) return false;
+          if (/^[-*]\s/.test(trimmed) && trimmed.length < 80) return false;
+          if (/^[-*]\s/.test(trimmed) && /(constraint|must|should|output|missing|required|已完成|缺少|必须|不要|检查)/i.test(trimmed)) return false;
+          if (/^(wait|okay|now|let'?s|i will|i need|final decision)\b/i.test(trimmed)) return false;
+          return true;
+        });
+        const nonReasoningChars = nonReasoningLines.reduce((sum, l) => sum + l.length, 0);
+        if (nonReasoningChars >= 30) {
+          bestStart = marker.start;
+          break;
+        }
+      }
+
+      if (bestStart >= 0) {
+        let extracted = text.slice(bestStart);
+        // Strip common leading indentation
+        const lines = extracted.split("\n");
+        const minIndent = lines.reduce((min, line) => {
+          if (line.trim() === "") return min;
+          const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0;
+          return Math.min(min, indent);
+        }, Infinity);
+        if (minIndent > 0 && minIndent < Infinity) {
+          extracted = lines.map(l => l.trim() === "" ? "" : l.slice(minIndent)).join("\n");
+        }
+        // Strip thinking model artifacts
+        extracted = stripThinkingModelArtifacts(extracted);
+        return extracted;
+      }
     }
   }
 
@@ -1149,6 +1229,12 @@ function extractAnswerFromReasoning(text: string): string | undefined {
   const trimmed = text.trim();
   if (!trimmed) return undefined;
   if (/===\s*SECTION\s*[：:]/i.test(trimmed) || /^---ROLE---$/m.test(trimmed)) {
+    return undefined;
+  }
+  // If the text contains === TAG === markers but Strategy 0b didn't extract
+  // (all markers were in reasoning context), don't return the raw text —
+  // downstream parsers could mistake reasoning references for real output.
+  if (/===\s*[A-Z][A-Z0-9_]*\s*===/.test(trimmed) && !/===\s*(?:CHAPTER_TITLE|CHAPTER_CONTENT|UPDATED_STATE|UPDATED_HOOKS|CHAPTER_SUMMARY|UPDATED_SUBPLOTS|UPDATED_EMOTIONAL_ARCS|UPDATED_CHARACTER_MATRIX)\s*===/.test(trimmed)) {
     return undefined;
   }
   const reasoningCueMatches = trimmed.match(
