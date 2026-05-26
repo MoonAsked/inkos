@@ -1163,9 +1163,12 @@ function extractAnswerFromReasoning(text: string): string | undefined {
     "## 本章 hook 账", "## Hook ledger for this chapter",
     "## 不要做", "## Do not",
   ];
-  // Find all positions of planner headings in the text
+  // Find all positions of planner headings in the text.
+  // Also search for headings wrapped in italic/bold markers (*## heading*, **## heading**),
+  // which is a common thinking model artifact.
   const headingPositions: { pos: number; heading: string }[] = [];
   for (const heading of plannerHeadings) {
+    // Plain heading
     let searchFrom = 0;
     while (searchFrom < text.length) {
       const pos = text.indexOf(heading, searchFrom);
@@ -1173,16 +1176,28 @@ function extractAnswerFromReasoning(text: string): string | undefined {
       headingPositions.push({ pos, heading });
       searchFrom = pos + heading.length;
     }
+    // Italic/bold-wrapped heading: *## heading*, **## heading**, ***## heading***
+    for (const wrap of ["*", "**", "***"]) {
+      const wrapped = `${wrap}${heading}${wrap}`;
+      searchFrom = 0;
+      while (searchFrom < text.length) {
+        const pos = text.indexOf(wrapped, searchFrom);
+        if (pos < 0) break;
+        headingPositions.push({ pos, heading });
+        searchFrom = pos + wrapped.length;
+      }
+    }
   }
   headingPositions.sort((a, b) => a.pos - b.pos);
   // Find the earliest position where at least 3 distinct planner headings appear
-  // within a reasonable window (5000 chars — a typical memo is 1000-3000 chars)
+  // within a reasonable window (8000 chars — thinking models may insert reasoning
+  // noise between headings, so the window is larger than a typical memo size)
   if (headingPositions.length >= 3) {
     for (let start = 0; start <= headingPositions.length - 3; start++) {
       const windowStart = headingPositions[start]!.pos;
       const uniqueHeadingsInWindow = new Set<string>();
       for (let j = start; j < headingPositions.length; j++) {
-        if (headingPositions[j]!.pos - windowStart > 5000) break;
+        if (headingPositions[j]!.pos - windowStart > 8000) break;
         uniqueHeadingsInWindow.add(headingPositions[j]!.heading);
       }
       if (uniqueHeadingsInWindow.size >= 3) {
@@ -1228,6 +1243,19 @@ function extractAnswerFromReasoning(text: string): string | undefined {
 
   const trimmed = text.trim();
   if (!trimmed) return undefined;
+  // Before applying strict guards, check if the text looks like a planner memo
+  // (YAML frontmatter or planner headings). Planner memos naturally contain
+  // words like "不要", "必须", "输出" in their structured content — these
+  // are NOT reasoning noise. Also, thinking models may reference === SECTION: ===
+  // markers in their reasoning (discussing output format) while also containing
+  // a valid planner memo, so we must check planner structure BEFORE the
+  // === SECTION: === guard to avoid false negatives.
+  const hasPlannerFrontmatter = /^-{3}\s*\n[\s\S]*?\n-{3}\s*\n/.test(trimmed);
+  const hasPlannerHeadings = /## (?:当前任务|Current task|读者此刻在等什么|What the reader is waiting for|该兑现的|To pay off|日常\/过渡承担什么任务|What the slow|关键抉择过三连问|Three-question check|章尾必须发生的改变|Required end-of-chapter change|本章 hook 账|Hook ledger for this chapter|不要做|Do not)/.test(trimmed);
+  if (hasPlannerFrontmatter || hasPlannerHeadings) {
+    // Strip thinking model artifacts (code blocks, italicized headings) before returning
+    return stripThinkingModelArtifacts(trimmed);
+  }
   if (/===\s*SECTION\s*[：:]/i.test(trimmed) || /^---ROLE---$/m.test(trimmed)) {
     return undefined;
   }
