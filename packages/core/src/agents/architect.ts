@@ -1347,8 +1347,10 @@ name: <角色名>
     // CJK text: ~1.5 chars/token; reserve tokens for system prompt + maxTokens output.
     // Use only 70% of context window to leave headroom for KV cache and prompt processing.
     const contextWindow = this.ctx.client._piModel?.contextWindow ?? 128_000;
+    const modelMaxOutput = this.ctx.client._piModel?.maxTokens ?? 131072;
+    const effectiveMaxTokens = Math.min(131072, modelMaxOutput); // clamp like provider does
     const usableContext = Math.floor(contextWindow * 0.7);
-    const reservedForSystemAndOutput = (systemPrompt.length / 1.5) + 87381 + 4096; // system + output (131072 tokens ≈ 87381 chars at 1.5 chars/token) + safety margin
+    const reservedForSystemAndOutput = (systemPrompt.length / 1.5) + (effectiveMaxTokens / 1.5) + 4096; // system + output (effectiveMaxTokens tokens in chars at 1.5 chars/token) + safety margin
     const maxUserChars = Math.floor((usableContext - reservedForSystemAndOutput) * 1.5);
     let truncated = false;
     let safeText = chaptersText;
@@ -1376,7 +1378,7 @@ name: <角色名>
       : `以下是《${book.title}》的已有正文资料包，请从中反向推导完整基础设定：\n\n${safeText}${truncationNote}`;
 
     const maxParseRetries = 3;
-    const importMaxTokens = 131072;
+    const importMaxTokens = effectiveMaxTokens;
     // Accumulate sections across retries so partial progress is preserved.
     const accumulatedSections = new Map<string, string>();
     let lastResponseContent = "";
