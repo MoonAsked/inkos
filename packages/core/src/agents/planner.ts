@@ -242,13 +242,26 @@ export class PlannerAgent extends BaseAgent {
     let lastError: PlannerParseError | undefined;
 
     for (let attempt = 0; attempt < MEMO_RETRY_LIMIT; attempt += 1) {
-      const response = await this.chat(
-        [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: currentUserMessage },
-        ],
-        { temperature: 0.7 },
-      );
+      let response: { content: string };
+      try {
+        response = await this.chat(
+          [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: currentUserMessage },
+          ],
+          { temperature: 0.7 },
+        );
+      } catch (chatError: any) {
+        // Retry on empty LLM response (common with thinking/reasoning models
+        // that put all output in thinking_delta but extractAnswerFromReasoning
+        // fails to recover the structured content).
+        const errMsg = chatError?.message ?? "";
+        if (errMsg.includes("empty response") && attempt < MEMO_RETRY_LIMIT - 1) {
+          this.log?.warn(`[planner] LLM returned empty response (attempt ${attempt + 1}/${MEMO_RETRY_LIMIT}), retrying...`);
+          continue;
+        }
+        throw chatError;
+      }
 
       try {
         return this.parseMemoWithProviderRecovery(

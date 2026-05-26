@@ -1153,6 +1153,19 @@ function extractAnswerFromReasoning(text: string): string | undefined {
   // Thinking models often output the structured answer in reasoning_content without
   // YAML frontmatter. The answer is recognizable by multiple ## headings that match
   // the planner memo format. Find the earliest such heading and extract from there.
+  //
+  // Pre-process: strip code-block wrapping that thinking models often add around
+  // the entire answer (```markdown ... ```). This must happen before heading search
+  // so that headings inside code blocks are visible to the plain-text search below.
+  let textForHeadingSearch = text;
+  {
+    const cbMatch = textForHeadingSearch.match(/\n\s*```\s*(?:markdown|md)?\s*\n([\s\S]*?)\n\s*```\s*$/);
+    if (cbMatch) {
+      textForHeadingSearch = text.slice(0, cbMatch.index! + 1) + cbMatch[1]! + text.slice(cbMatch.index! + 1 + cbMatch[0]!.length);
+    }
+    // Also strip inline italic/bold around ## headings in the search text
+    textForHeadingSearch = textForHeadingSearch.replace(/^(\s*)\*{1,3}(## .+?)\*{1,3}/gm, "$1$2");
+  }
   const plannerHeadings = [
     "## 当前任务", "## Current task",
     "## 读者此刻在等什么", "## What the reader is waiting for right now",
@@ -1170,8 +1183,8 @@ function extractAnswerFromReasoning(text: string): string | undefined {
   for (const heading of plannerHeadings) {
     // Plain heading
     let searchFrom = 0;
-    while (searchFrom < text.length) {
-      const pos = text.indexOf(heading, searchFrom);
+    while (searchFrom < textForHeadingSearch.length) {
+      const pos = textForHeadingSearch.indexOf(heading, searchFrom);
       if (pos < 0) break;
       headingPositions.push({ pos, heading });
       searchFrom = pos + heading.length;
@@ -1180,8 +1193,8 @@ function extractAnswerFromReasoning(text: string): string | undefined {
     for (const wrap of ["*", "**", "***"]) {
       const wrapped = `${wrap}${heading}${wrap}`;
       searchFrom = 0;
-      while (searchFrom < text.length) {
-        const pos = text.indexOf(wrapped, searchFrom);
+      while (searchFrom < textForHeadingSearch.length) {
+        const pos = textForHeadingSearch.indexOf(wrapped, searchFrom);
         if (pos < 0) break;
         headingPositions.push({ pos, heading });
         searchFrom = pos + wrapped.length;
@@ -1189,21 +1202,25 @@ function extractAnswerFromReasoning(text: string): string | undefined {
     }
   }
   headingPositions.sort((a, b) => a.pos - b.pos);
-  // Find the earliest position where at least 3 distinct planner headings appear
-  // within a reasonable window (8000 chars — thinking models may insert reasoning
-  // noise between headings, so the window is larger than a typical memo size)
-  if (headingPositions.length >= 3) {
-    for (let start = 0; start <= headingPositions.length - 3; start++) {
+  // Find the earliest position where at least 2 distinct planner headings appear
+  // within a reasonable window (16000 chars — thinking models may insert long
+  // reasoning noise between headings, so the window is generous). Threshold is 2
+  // (not 3) because thinking models may exhaust their token budget after emitting
+  // only a few sections.
+  if (headingPositions.length >= 2) {
+    for (let start = 0; start <= headingPositions.length - 2; start++) {
       const windowStart = headingPositions[start]!.pos;
       const uniqueHeadingsInWindow = new Set<string>();
       for (let j = start; j < headingPositions.length; j++) {
-        if (headingPositions[j]!.pos - windowStart > 8000) break;
+        if (headingPositions[j]!.pos - windowStart > 16000) break;
         uniqueHeadingsInWindow.add(headingPositions[j]!.heading);
       }
-      if (uniqueHeadingsInWindow.size >= 3) {
-        // Found a block with 3+ planner headings. Extract from the earliest heading
+      if (uniqueHeadingsInWindow.size >= 2) {
+        // Found a block with 2+ planner headings. Extract from the earliest heading
         // to the end of the text. Trim trailing non-memo content (reasoning leftovers).
-        let block = text.slice(windowStart);
+        // Use textForHeadingSearch (which has code-block fences and italic markers
+        // stripped) so the extracted block is clean.
+        let block = textForHeadingSearch.slice(windowStart);
         // Trim trailing lines that look like reasoning/checking (e.g. "现在检查：", "验证：")
         const blockLines = block.split("\n");
         let trimEnd = blockLines.length;
@@ -1232,7 +1249,7 @@ function extractAnswerFromReasoning(text: string): string | undefined {
         // text before the headings. threadRefs is a YAML list that thinking models
         // may format with inconsistent indentation — extract the IDs and re-emit
         // with correct indentation.
-        const beforeHeadings = text.slice(0, windowStart);
+        const beforeHeadings = textForHeadingSearch.slice(0, windowStart);
         const chapterMatch = beforeHeadings.match(/chapter:\s*(\d+)/g);
         const goalMatch = beforeHeadings.match(/goal:\s*["']?([^\n"']{1,80})["']?/g);
         const lastChapter = chapterMatch?.[chapterMatch.length - 1]?.match(/(\d+)/)?.[1];
@@ -1254,7 +1271,7 @@ function extractAnswerFromReasoning(text: string): string | undefined {
     }
   }
 
-  const trimmed = text.trim();
+  const trimmed = textForHeadingSearch.trim();
   if (!trimmed) return undefined;
   // Before applying strict guards, check if the text looks like a planner memo
   // (YAML frontmatter or planner headings). Planner memos naturally contain
@@ -1263,6 +1280,8 @@ function extractAnswerFromReasoning(text: string): string | undefined {
   // markers in their reasoning (discussing output format) while also containing
   // a valid planner memo, so we must check planner structure BEFORE the
   // === SECTION: === guard to avoid false negatives.
+  // Use textForHeadingSearch (code-block fences and italic markers stripped)
+  // so headings inside code blocks are detected.
   const hasPlannerFrontmatter = /^-{3}\s*\n[\s\S]*?\n-{3}\s*\n/.test(trimmed);
   const hasPlannerHeadings = /## (?:当前任务|Current task|读者此刻在等什么|What the reader is waiting for|该兑现的|To pay off|日常\/过渡承担什么任务|What the slow|关键抉择过三连问|Three-question check|章尾必须发生的改变|Required end-of-chapter change|本章 hook 账|Hook ledger for this chapter|不要做|Do not)/.test(trimmed);
   if (hasPlannerFrontmatter || hasPlannerHeadings) {
