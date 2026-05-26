@@ -1228,7 +1228,10 @@ function extractAnswerFromReasoning(text: string): string | undefined {
         }
         // Strip thinking model artifacts (code blocks, italicized headings)
         block = stripThinkingModelArtifacts(block);
-        // Try to extract chapter number and goal from the thinking text before the headings
+        // Try to extract chapter number, goal, and threadRefs from the thinking
+        // text before the headings. threadRefs is a YAML list that thinking models
+        // may format with inconsistent indentation — extract the IDs and re-emit
+        // with correct indentation.
         const beforeHeadings = text.slice(0, windowStart);
         const chapterMatch = beforeHeadings.match(/chapter:\s*(\d+)/g);
         const goalMatch = beforeHeadings.match(/goal:\s*["']?([^\n"']{1,80})["']?/g);
@@ -1236,7 +1239,17 @@ function extractAnswerFromReasoning(text: string): string | undefined {
         const lastGoal = goalMatch?.[goalMatch.length - 1]?.replace(/^goal:\s*["']?/, "").replace(/["']?\s*$/, "");
         const chapterYaml = lastChapter ? `chapter: ${lastChapter}` : "chapter: 0";
         const goalYaml = lastGoal ? `goal: "${lastGoal.replace(/"/g, '\\"')}"` : 'goal: "(auto-extracted)"';
-        return `---\n${chapterYaml}\n${goalYaml}\n---\n${block}`;
+        // Extract threadRefs IDs: match lines like "  - H03" or "- H03" (with or
+        // without consistent indentation) that appear after a "threadRefs:" key.
+        const threadRefsMatch = beforeHeadings.match(/threadRefs:\s*\n((?:\s*-[\s]*[A-Za-z0-9_-]+\n?)+)/);
+        let threadRefsYaml = "threadRefs: []";
+        if (threadRefsMatch) {
+          const ids = [...threadRefsMatch[1]!.matchAll(/-\s*([A-Za-z0-9_-]+)/g)].map((m) => m[1]!);
+          if (ids.length > 0) {
+            threadRefsYaml = `threadRefs:\n${ids.map((id) => `  - ${id}`).join("\n")}`;
+          }
+        }
+        return `---\n${chapterYaml}\n${goalYaml}\n${threadRefsYaml}\n---\n${block}`;
       }
     }
   }

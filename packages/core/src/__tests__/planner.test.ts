@@ -389,6 +389,31 @@ defer:
     ).rejects.toBeInstanceOf(PlannerParseError);
   });
 
+  it("recovers from inconsistent threadRefs indentation in YAML frontmatter", async () => {
+    // Simulate LLM outputting threadRefs with mixed indentation:
+    //   threadRefs:
+    //     - H596-1    ← indent 2 (correct)
+    //     - H596-2    ← indent 2 (correct)
+    //    - H603-1     ← indent 1 (incorrect — causes js-yaml "bad indentation")
+    //    - H603-2     ← indent 1 (incorrect)
+    const badYamlMemo = `---\nchapter: 606\ngoal: 尴尬的政法委书记面对两方施压\nisGoldenOpening: false\nthreadRefs:\n  - H596-1\n  - H596-2\n - H603-1\n - H603-2\n---\n${VALID_BODY}\n`;
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: badYamlMemo,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 606,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(606);
+    expect(result.memo.threadRefs).toEqual(["H596-1", "H596-2", "H603-1", "H603-2"]);
+    expect(result.memo.body).toContain("## 当前任务");
+  });
+
   // Phase hotfix 5: planner.intent.mustAvoid must come from the Phase 5
   // authoritative loader (story_frame frontmatter), not from raw
   // book_rules.md — for new-layout books the legacy file is just a shim.

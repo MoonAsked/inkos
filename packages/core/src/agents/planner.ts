@@ -1,5 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import YAML from "js-yaml";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import { readBookRules as readAuthoritativeBookRules } from "./rules-reader.js";
@@ -309,6 +310,19 @@ export class PlannerAgent extends BaseAgent {
       return `---\n${fixedYaml}\n---\n${body}`;
     }
 
+    // Recover from invalid YAML in frontmatter — most commonly caused by
+    // inconsistent indentation in threadRefs list items (e.g. "- H03" at
+    // indent 0 vs "  - S004" at indent 2). Re-normalize the YAML and retry.
+    if (parseErrorMessage.startsWith("invalid YAML in frontmatter")) {
+      const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (match) {
+        const fixedYaml = this.repairMemoYaml(match[1]!);
+        if (fixedYaml) {
+          return `---\n${fixedYaml}\n---\n${match[2]}`;
+        }
+      }
+    }
+
     // Recover when the LLM truncated trailing sections (common with thinking
     // models that exhaust their token budget). We auto-append default content
     // for any combination of missing "## 本章 hook 账" and "## 不要做" —
@@ -365,6 +379,116 @@ export class PlannerAgent extends BaseAgent {
       "---",
       body,
     ].join("\n");
+  }
+
+  /**
+   * Attempt to repair common YAML frontmatter issues produced by LLMs:
+   * - Inconsistent indentation in list values (e.g. threadRefs items)
+   * - Mixed dash-indent styles ("- item" vs "  - item")
+   *
+   * Instead of trying to patch the broken YAML text, we parse what we can
+   * line-by-line and re-emit a clean YAML string. This is more robust than
+   * regex-based patching for the planner's small, known schema.
+   *
+   * Returns the repaired YAML string, or undefined if repair fails.
+   */
+  private repairMemoYaml(yamlText: string): string | undefined {
+    try {
+      const lines = yamlText.split("\n");
+
+      // Extract scalar fields by simple key: value matching
+      let chapter: number | undefined;
+      let goal: string | undefined;
+      let isGoldenOpening: boolean | undefined;
+
+      // Extract list items for threadRefs: collect all "- ID" lines that
+      // appear after a "threadRefs:" key, regardless of indentation.
+      let inThreadRefs = false;
+      const threadRefIds: string[] = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+
+        // Detect threadRefs key
+        if (/^threadRefs\s*:\s*$/.test(trimmed)) {
+          inThreadRefs = true;
+          continue;
+        }
+        // threadRefs: [] inline form
+        const inlineThreadRefs = trimmed.match(/^threadRefs\s*:\s*\[\]\s*$/);
+        if (inlineThreadRefs) {
+          inThreadRefs = false;
+          continue;
+        }
+
+        // Any other key resets threadRefs tracking
+        if (/^[a-zA-Z_]\w*\s*:/.test(trimmed) && !/^threadRefs/.test(trimmed)) {
+          inThreadRefs = false;
+        }
+
+        if (inThreadRefs) {
+          const itemMatch = trimmed.match(/^-\s+([A-Za-z0-9_-]+)\s*$/);
+          if (itemMatch) {
+            threadRefIds.push(itemMatch[1]!);
+            continue;
+          }
+          // If it's not a list item, we've left the threadRefs block
+          inThreadRefs = false;
+        }
+
+        // Extract scalar fields
+        const chapterMatch = trimmed.match(/^chapter\s*:\s*(\d+)\s*$/);
+        if (chapterMatch) {
+          chapter = Number(chapterMatch[1]);
+          continue;
+        }
+        const goalMatch = trimmed.match(/^goal\s*:\s*["'](.+)["']\s*$/);
+        if (goalMatch) {
+          goal = goalMatch[1];
+          continue;
+        }
+        const goalUnquoted = trimmed.match(/^goal\s*:\s*(.+)\s*$/);
+        if (goalUnquoted && !goal) {
+          goal = goalUnquoted[1]!.trim();
+          continue;
+        }
+        const goldenMatch = trimmed.match(/^isGoldenOpening\s*:\s*(true|false)\s*$/);
+        if (goldenMatch) {
+          isGoldenOpening = goldenMatch[1] === "true";
+          continue;
+        }
+      }
+
+      // We must have at least chapter and goal to produce valid YAML
+      if (chapter === undefined || goal === undefined) {
+        return undefined;
+      }
+
+      // Re-emit clean YAML
+      const parts: string[] = [
+        `chapter: ${chapter}`,
+        `goal: ${JSON.stringify(goal)}`,
+      ];
+      if (isGoldenOpening !== undefined) {
+        parts.push(`isGoldenOpening: ${isGoldenOpening}`);
+      }
+      if (threadRefIds.length > 0) {
+        parts.push(`threadRefs:\n${threadRefIds.map((id) => `  - ${id}`).join("\n")}`);
+      } else {
+        parts.push("threadRefs: []");
+      }
+
+      const fixedYaml = parts.join("\n");
+
+      // Validate the repaired YAML parses correctly
+      const parsed = YAML.load(fixedYaml);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return fixedYaml;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private findPlannerMemoBodyStart(raw: string): number {
