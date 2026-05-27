@@ -2601,13 +2601,39 @@ ${matrix}`,
 
         const architect = new ArchitectAgent(this.agentCtxFor("architect", input.bookId));
         const isSeries = input.importMode === "series";
-        const foundation = await this.generateAndReviewFoundation({
-          generate: (reviewFeedback) => architect.generateFoundationFromImport(book, sampledText, undefined, reviewFeedback, { importMode: isSeries ? "series" : undefined }),
-          reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
-          mode: isSeries ? "series" : "original",
-          language: resolvedLanguage === "en" ? "en" : "zh",
-          stageLanguage: resolvedLanguage,
-        });
+        let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
+        try {
+          foundation = await this.generateAndReviewFoundation({
+            generate: (reviewFeedback) => architect.generateFoundationFromImport(book, sampledText, undefined, reviewFeedback, { importMode: isSeries ? "series" : undefined }),
+            reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
+            mode: isSeries ? "series" : "original",
+            language: resolvedLanguage === "en" ? "en" : "zh",
+            stageLanguage: resolvedLanguage,
+          });
+        } catch (step1Error) {
+          // If Step 1 foundation generation is blocked by content_filter,
+          // retry with only chapter titles (no prose) so the architect can
+          // still produce a skeleton foundation from structural metadata.
+          if (!this.isProviderContentFilterError(step1Error)) {
+            throw step1Error;
+          }
+          log?.warn(this.localize(resolvedLanguage, {
+            zh: "步骤 1 基础设定生成被 content_filter 拦截；改用章节标题摘要重试。",
+            en: "Step 1 foundation generation blocked by content_filter; retrying with chapter title summary only.",
+          }));
+          const titleOnlyText = input.chapters.map((c, i) =>
+            resolvedLanguage === "en"
+              ? `Chapter ${i + 1}: ${c.title}`
+              : `第${i + 1}章 ${c.title}`,
+          ).join("\n");
+          foundation = await this.generateAndReviewFoundation({
+            generate: (reviewFeedback) => architect.generateFoundationFromImport(book, titleOnlyText, undefined, reviewFeedback, { importMode: isSeries ? "series" : undefined }),
+            reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
+            mode: isSeries ? "series" : "original",
+            language: resolvedLanguage === "en" ? "en" : "zh",
+            stageLanguage: resolvedLanguage,
+          });
+        }
         await architect.writeFoundationFiles(
           bookDir,
           foundation,
@@ -3047,10 +3073,19 @@ ${matrix}`,
 
     const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
     let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
-    const generateFoundationMergeRaw = (sourceText: string) => architect.generateFoundationFromImport(
+    const generateFoundationMergeRaw = (sourceText: string, externalCtx?: string) => architect.generateFoundationFromImport(
       book,
       sourceText,
-      existingFoundationText,
+      externalCtx ?? existingFoundationText,
+      undefined,
+      { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
+    );
+    // Variant that omits externalContext entirely — used as a last-resort retry
+    // when the existing foundation files themselves trigger content_filter.
+    const generateFoundationMergeRawNoContext = (sourceText: string) => architect.generateFoundationFromImport(
+      book,
+      sourceText,
+      undefined,  // no external context
       undefined,
       { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
     );
@@ -3095,14 +3130,36 @@ ${matrix}`,
       try {
         foundation = await generateFoundationMerge(safeChapterText);
       } catch (retryError) {
-        if (!this.isArchitectMissingRequiredSectionsError(retryError)) {
+        const retryIsContentFilter = this.isProviderContentFilterError(retryError);
+        const retryIsMissingSections = this.isArchitectMissingRequiredSectionsError(retryError);
+        if (retryIsContentFilter) {
+          // Fact-package retry still hit content_filter — the externalContext
+          // (existing foundation files) may contain flagged content.  Try once
+          // more WITHOUT externalContext so only the safe fact package is sent.
+          log?.warn(this.localize(language, {
+            zh: `章节 ${chapterNumber} 事实包重试仍被 content_filter 拦截；尝试去掉外部上下文后重试。`,
+            en: `Chapter ${chapterNumber} fact-package retry still hit content_filter; retrying without external context.`,
+          }));
+          try {
+            foundation = await generateFoundationMergeRawNoContext(safeChapterText);
+          } catch (noContextError) {
+            // All retries exhausted — skip foundation write-back for this chapter
+            // rather than crashing the entire import.
+            log?.warn(this.localize(language, {
+              zh: `章节 ${chapterNumber} 基础设定合并所有重试均被 content_filter 拦截；跳过本章基础设定写回，保留现有基础设定。`,
+              en: `Chapter ${chapterNumber} foundation merge exhausted all content_filter retries; skipping foundation write-back and keeping the existing foundation.`,
+            }));
+            return;
+          }
+        } else if (!retryIsMissingSections) {
           throw retryError;
+        } else {
+          log?.warn(this.localize(language, {
+            zh: `章节 ${chapterNumber} 基础设定合并重试仍缺段；跳过本章基础设定写回，保留现有基础设定。`,
+            en: `Chapter ${chapterNumber} foundation merge retry still missed required sections; skipping foundation write-back and keeping the existing foundation.`,
+          }));
+          return;
         }
-        log?.warn(this.localize(language, {
-          zh: `章节 ${chapterNumber} 基础设定合并重试仍缺段；跳过本章基础设定写回，保留现有基础设定。`,
-          en: `Chapter ${chapterNumber} foundation merge retry still missed required sections; skipping foundation write-back and keeping the existing foundation.`,
-        }));
-        return;
       }
     }
 
