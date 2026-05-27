@@ -1196,10 +1196,42 @@ You MUST emit all **5 SECTION blocks in order**: story_frame → volume_map → 
     this.log?.debug(`[architect] generateFoundationFromImport: genre=${book.genre}, language=${resolvedLanguage}, importMode=${options?.importMode ?? "default"}, chaptersText=${chaptersText.length} chars, requiredSections=[${requiredSections.join(",")}]`);
     const reviewFeedbackBlock = this.buildReviewFeedbackBlock(reviewFeedback, resolvedLanguage);
 
-    const contextBlock = externalContext
+    // Truncate externalContext if it would make the system prompt exceed the
+    // context window.  We estimate the system prompt template (without
+    // externalContext) at ~5000 chars, then reserve tokens for output + user
+    // message + safety margin.
+    const contextWindow = this.ctx.client._piModel?.contextWindow ?? 128_000;
+    const modelMaxOutput = this.ctx.client._piModel?.maxTokens ?? 131072;
+    const effectiveMaxTokens = Math.min(131072, modelMaxOutput); // clamp like provider does
+    const usableContext = Math.floor(contextWindow * 0.7);
+    // Reserve: output tokens + user message budget (at least 4096 tokens) + safety margin
+    const reservedForOutputAndUser = effectiveMaxTokens + 4096 + 4096;
+    const maxSystemTokens = usableContext - reservedForOutputAndUser;
+    // Rough estimate of system prompt template chars (without externalContext):
+    // genre body + review feedback + fixed template ≈ 5000 chars baseline
+    const systemTemplateEstimateChars = 5000 + (reviewFeedback?.length ?? 0) + genreBody.length;
+    const maxExternalContextTokens = maxSystemTokens - Math.ceil(systemTemplateEstimateChars / 1.5);
+    const maxExternalContextChars = Math.floor(Math.max(0, maxExternalContextTokens) * 1.5);
+    let safeExternalContext = externalContext ?? "";
+    if (safeExternalContext.length > maxExternalContextChars && maxExternalContextChars > 0) {
+      // Keep the first 70% and last 25% of the allowed budget; skip the middle.
+      const headLen = Math.floor(maxExternalContextChars * 0.7);
+      const tailLen = Math.floor(maxExternalContextChars * 0.25);
+      const truncNotice = resolvedLanguage === "en"
+        ? "\n\n--- [MIDDLE SECTION OMITTED — external context too long for context window] ---\n\n"
+        : "\n\n--- [中间部分已省略——外部指令超出上下文窗口] ---\n\n";
+      safeExternalContext = safeExternalContext.slice(0, headLen) + truncNotice + safeExternalContext.slice(safeExternalContext.length - tailLen);
+      this.log?.info(`[architect] Truncated external context: ${externalContext!.length} → ${safeExternalContext.length} chars (contextWindow=${contextWindow}, maxExternalContextChars=${maxExternalContextChars})`);
+    } else if (maxExternalContextChars <= 0 && safeExternalContext.length > 0) {
+      // System template alone exceeds budget — drop external context entirely
+      this.log?.warn(`[architect] External context dropped entirely: system template already exceeds context budget (maxSystemTokens=${maxSystemTokens}, templateEstimate=${Math.ceil(systemTemplateEstimateChars / 1.5)})`);
+      safeExternalContext = "";
+    }
+
+    const contextBlock = safeExternalContext
       ? (resolvedLanguage === "en"
-          ? `\n\n## External Instructions\n${externalContext}\n`
-          : `\n\n## 外部指令\n${externalContext}\n`)
+          ? `\n\n## External Instructions\n${safeExternalContext}\n`
+          : `\n\n## 外部指令\n${safeExternalContext}\n`)
       : "";
 
     const numericalBlock = gp.numericalSystem
@@ -1345,13 +1377,10 @@ name: <角色名>
 
     // Truncate chaptersText if it exceeds the context window.
     // CJK text: ~1.5 chars/token; reserve tokens for system prompt + maxTokens output.
-    // Use only 70% of context window to leave headroom for KV cache and prompt processing.
-    const contextWindow = this.ctx.client._piModel?.contextWindow ?? 128_000;
-    const modelMaxOutput = this.ctx.client._piModel?.maxTokens ?? 131072;
-    const effectiveMaxTokens = Math.min(131072, modelMaxOutput); // clamp like provider does
-    const usableContext = Math.floor(contextWindow * 0.7);
-    const reservedForSystemAndOutput = (systemPrompt.length / 1.5) + (effectiveMaxTokens / 1.5) + 4096; // system + output (effectiveMaxTokens tokens in chars at 1.5 chars/token) + safety margin
-    const maxUserChars = Math.floor((usableContext - reservedForSystemAndOutput) * 1.5);
+    // contextWindow / effectiveMaxTokens / usableContext are already declared above
+    // (before the externalContext truncation block).
+    const reservedForSystemAndOutput = Math.ceil(systemPrompt.length / 1.5) + effectiveMaxTokens + 4096; // system prompt tokens + output tokens + safety margin
+    const maxUserChars = Math.floor(Math.max(0, usableContext - reservedForSystemAndOutput) * 1.5);
     let truncated = false;
     let safeText = chaptersText;
     if (chaptersText.length > maxUserChars && maxUserChars > 0) {
@@ -1365,6 +1394,14 @@ name: <角色名>
         : "\n\n--- [中间部分已省略——超出上下文窗口] ---\n\n";
       safeText = chaptersText.slice(0, headLen) + skipNotice + chaptersText.slice(chaptersText.length - tailLen);
       this.log?.info(`[architect] Truncated import text: ${chaptersText.length} → ${safeText.length} chars (contextWindow=${contextWindow}, maxUserChars=${maxUserChars})`);
+    } else if (maxUserChars <= 0) {
+      // System prompt alone exceeds usableContext — truncate user text to a minimal
+      // stub so the LLM still receives a valid request.  The externalContext
+      // truncation above should normally prevent this, but guard against it.
+      const emergencyChars = 2000;
+      safeText = chaptersText.slice(0, emergencyChars);
+      truncated = true;
+      this.log?.warn(`[architect] System prompt exceeds usable context (${Math.ceil(systemPrompt.length / 1.5)} tokens > ${usableContext}); truncated user text to ${emergencyChars} chars`);
     }
 
     const truncationNote = truncated

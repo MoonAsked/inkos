@@ -2566,7 +2566,9 @@ ${matrix}`,
           const tailCount = Math.min(5, chapterChunks.length - headCount);
           const headChapters = chapterChunks.slice(0, headCount);
           const tailChapters = chapterChunks.slice(chapterChunks.length - tailCount);
-          let budget = usableTokens - 16384 - 4096; // reserve for system prompt + output
+          const modelMaxOutput = this.agentCtxFor("architect", input.bookId).client._piModel?.maxTokens ?? 131072;
+          const effectiveMaxOutput = Math.min(131072, modelMaxOutput); // clamp like provider does
+          let budget = usableTokens - 8192 - effectiveMaxOutput - 4096; // reserve for system prompt (~8192 tokens) + output + safety margin
           let selected: typeof chapterChunks = [];
           for (const ch of headChapters) {
             if (budget > ch.tokens) { selected.push(ch); budget -= ch.tokens; }
