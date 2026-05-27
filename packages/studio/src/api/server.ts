@@ -847,6 +847,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
       : sseSink;
     const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, consoleSink] });
+    logger.info("启动", { service: currentConfig.llm.service, model: currentConfig.llm.model });
     return {
       client: overrides?.client ?? createLLMClient(currentConfig.llm),
       model: overrides?.model ?? currentConfig.llm.model,

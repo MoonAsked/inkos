@@ -133,6 +133,7 @@ export function buildPipelineConfig(
 
   const hasLogging = sinks.length > 0;
   const logger = hasLogging ? createLogger({ tag: "inkos", sinks }) : undefined;
+  logger?.info("启动", { service: config.llm.service, model: config.llm.model });
 
   const onStreamProgress = hasLogging
     ? (progress: { readonly elapsedMs: number; readonly totalChars: number; readonly chineseChars: number; readonly thinkingChars: number; readonly status: string; readonly label?: string; readonly recentText?: string; readonly currentSection?: string }) => {
