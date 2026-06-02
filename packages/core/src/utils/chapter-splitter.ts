@@ -3,6 +3,15 @@ export interface SplitChapter {
   readonly content: string;
 }
 
+export interface VolumeInfo {
+  readonly volumeNumber: number;
+  readonly label: string;
+  readonly title: string;
+  readonly chapterStart: number;
+  readonly chapterEnd: number;
+  readonly chapterCount: number;
+}
+
 /**
  * Split a single text file into chapters by matching title lines,
  * then clean noise (ads, HTML, watermarks) from chapter content.
@@ -10,6 +19,8 @@ export interface SplitChapter {
  * Default pattern matches:
  * - "第一章 xxxx" / "第1章 xxxx"
  * - "第一卷001章 xxxx" / "第一卷1章 xxxx" (volume + chapter)
+ * - "第一节 xxxx" / "第1节 xxxx" (section as chapter)
+ * - "第一節 xxxx" / "第1節 xxxx" (traditional Chinese)
  * - "第一回 xxxx" / "第1回 xxxx"
  * - "# 第1章 xxxx" / "## 第23章 xxxx"
  * - "CHAPTER I." / "CHAPTER II."
@@ -25,10 +36,10 @@ export function splitChapters(
 ): ReadonlyArray<SplitChapter> {
   // [零〇○Ｏ０一二三四五六七八九十百千万\d]+ matches Chinese/Arabic volume number
   // \d* matches optional Arabic chapter number after volume (e.g., 第一卷001章)
-  // Group 1: title after 第X章/第X回
+  // Group 1: title after 第X章/第X回/第X节
   // Group 2: title after Chapter N
   // Group 3: full match for bare NNN章 (no 第 prefix) — title extracted separately
-  const defaultPattern = /^#{0,2}\s*(?:第[零〇○Ｏ０一二三四五六七八九十百千万\d]+卷?\d*(?:章|回)(?:[:：]|\s+)?\s*(.*)|Chapter\s+(?:\d+|[IVXLCDM]+)(?:\.|:|\s+)?\s*(.*)|(\d{2,4}章\s*\S.*))/i;
+  const defaultPattern = /^#{0,2}\s*(?:第[零〇○Ｏ０一二三四五六七八九十百千万\d]+卷?\d*(?:章|回|节|節)(?:[:：]|\s+)?\s*(.*)|Chapter\s+(?:\d+|[IVXLCDM]+)(?:\.|:|\s+)?\s*(.*)|(\d{2,4}章\s*\S.*))/i;
   const regex = pattern ? new RegExp(pattern, "m") : defaultPattern;
 
   const lines = text.split("\n");
@@ -291,5 +302,113 @@ function inferFallbackTitle(headingLine: string, chapterNumber: number): string 
     return `第${chapterNumber}回`;
   }
 
+  if (/第[零一二三四五六七八九十百千万\d]+[节節]/.test(headingLine)) {
+    return `第${chapterNumber}节`;
+  }
+
   return `第${chapterNumber}章`;
+}
+
+const VOLUME_DETECT_PATTERNS: ReadonlyArray<RegExp> = [
+  /^\s*第\s*([零一二三四五六七八九十百千\d]+)\s*卷[：:．.\s]*(.*)/u,
+  /^\s*(?:volume|vol\.?)\s+(\d+)[：:．.\s]*(.*)/i,
+];
+
+const CHINESE_NUMERAL_MAP: Readonly<Record<string, number>> = {
+  零: 0, 一: 1, 二: 2, 三: 3, 四: 4,
+  五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+  十: 10, 百: 100, 千: 1000,
+};
+
+function parseVolumeNumber(token: string): number {
+  if (/^\d+$/.test(token)) return parseInt(token, 10);
+  // Handle simple single Chinese numeral
+  if (token.length === 1 && CHINESE_NUMERAL_MAP[token] !== undefined) {
+    return CHINESE_NUMERAL_MAP[token]!;
+  }
+  // Handle compound numerals up to 99 (e.g., 二十五)
+  if (token.includes("十")) {
+    const parts = token.split("十");
+    const tens = parts[0] ? CHINESE_NUMERAL_MAP[parts[0]] ?? 1 : 1;
+    const ones = parts[1] ? CHINESE_NUMERAL_MAP[parts[1]] ?? 0 : 0;
+    return tens * 10 + ones;
+  }
+  return 1; // fallback
+}
+
+/**
+ * Group already-split chapters by volume by scanning each chapter's title
+ * and leading content for volume markers like "第X卷", "Volume X", "Vol. X".
+ *
+ * Returns an array of VolumeInfo describing each detected volume and the
+ * chapter range it covers. If no volume markers are found, returns a single
+ * volume containing all chapters.
+ */
+export function groupChaptersByVolume(
+  chapters: ReadonlyArray<SplitChapter>,
+): ReadonlyArray<VolumeInfo> {
+  const volumes: Array<{ volumeNumber: number; label: string; title: string; startIndex: number }> = [];
+  let lastVolumeNum = 1;
+  let lastVolumeTitle = "";
+
+  for (let i = 0; i < chapters.length; i++) {
+    const ch = chapters[i]!;
+    const searchText = ch.title.length > 0 ? ch.title : ch.content.slice(0, 200);
+    let foundVolume: number | null = null;
+    let foundTitle = "";
+
+    for (const pattern of VOLUME_DETECT_PATTERNS) {
+      const match = searchText.match(pattern);
+      if (match) {
+        foundVolume = parseVolumeNumber(match[1]!);
+        foundTitle = (match[2] ?? "").trim();
+        break;
+      }
+    }
+
+    if (foundVolume !== null) {
+      lastVolumeNum = foundVolume;
+      lastVolumeTitle = foundTitle;
+      // Only register a new volume entry if we haven't seen this volume number
+      if (!volumes.some((v) => v.volumeNumber === foundVolume)) {
+        volumes.push({
+          volumeNumber: foundVolume,
+          label: /^[a-z]/i.test(foundTitle) ? `Volume ${foundVolume}` : `第${foundVolume}卷`,
+          title: foundTitle,
+          startIndex: i,
+        });
+      }
+    }
+  }
+
+  // If no volumes detected, wrap everything in one volume
+  if (volumes.length === 0) {
+    return [
+      {
+        volumeNumber: 1,
+        label: "第1卷",
+        title: "",
+        chapterStart: 0,
+        chapterEnd: chapters.length - 1,
+        chapterCount: chapters.length,
+      },
+    ];
+  }
+
+  // Build the final volume info with chapter ranges
+  const result: VolumeInfo[] = [];
+  for (let v = 0; v < volumes.length; v++) {
+    const vol = volumes[v]!;
+    const nextStart = v + 1 < volumes.length ? volumes[v + 1]!.startIndex : chapters.length;
+    result.push({
+      volumeNumber: vol.volumeNumber,
+      label: vol.label,
+      title: vol.title,
+      chapterStart: vol.startIndex,
+      chapterEnd: nextStart - 1,
+      chapterCount: nextStart - vol.startIndex,
+    });
+  }
+
+  return result;
 }

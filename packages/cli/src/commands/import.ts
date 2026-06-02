@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { PipelineRunner, StateManager, splitChapters, deriveBookIdFromTitle, normalizePlatformOrOther, type BookConfig } from "@actalk/inkos-core";
+import { PipelineRunner, StateManager, splitChapters, groupChaptersByVolume, deriveBookIdFromTitle, normalizePlatformOrOther, type BookConfig } from "@actalk/inkos-core";
 import { readFile, readdir, stat, mkdir } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { join, resolve } from "node:path";
@@ -160,7 +160,7 @@ importCommand
         if (chapters.length === 0) {
           throw new Error(
             `No chapters found in ${fromPath}. ` +
-            `Default pattern matches "第X章" and "Chapter X". Use --split to provide a custom regex.`,
+            `Default pattern matches "第X章", "第X节", and "Chapter X". Use --split to provide a custom regex.`,
           );
         }
       }
@@ -169,6 +169,17 @@ importCommand
         log(formatImportChaptersDiscovery(language, chapters.length, bookId));
         if (opts.resumeFrom) {
           log(formatImportChaptersResume(language, opts.resumeFrom));
+        }
+        // Detect and display volume structure
+        const volumes = groupChaptersByVolume(chapters);
+        if (volumes.length > 1) {
+          log(language === "en" ? "  Volume structure detected:" : "  检测到分卷结构：");
+          for (const v of volumes) {
+            const range = v.chapterStart === v.chapterEnd
+              ? `Ch.${v.chapterStart + 1}`
+              : `Ch.${v.chapterStart + 1}-${v.chapterEnd + 1}`;
+            log(`    ${v.label}${v.title ? ` ${v.title}` : ""}: ${range} (${v.chapterCount}章)`);
+          }
         }
       }
 

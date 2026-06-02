@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitChapters } from "../utils/chapter-splitter.js";
+import { splitChapters, groupChaptersByVolume } from "../utils/chapter-splitter.js";
 
 describe("splitChapters", () => {
   it("splits classical Chinese chapter headings with 第X回 by default", () => {
@@ -323,5 +323,117 @@ describe("splitChapters", () => {
     expect(chapters).toHaveLength(1);
     expect(chapters[0]?.content).not.toContain("最快更新");
     expect(chapters[0]?.content).toContain("杨洛拍拍肩膀。");
+  });
+
+  // ── Section (节) splitting ──
+
+  it("splits by 第X节 headings by default", () => {
+    const input = [
+      "第一节 穿越",
+      "",
+      "林轩睁开眼睛，发现自己躺在一片陌生的森林中。",
+      "",
+      "第二节 遭遇魔兽",
+      "",
+      "突然，一声咆哮从密林深处传来。",
+      "",
+      "第三节 绝境求生",
+      "",
+      "林轩咬紧牙关，握紧了手中的木棍。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(3);
+    expect(chapters[0]?.title).toBe("穿越");
+    expect(chapters[0]?.content).toBe("林轩睁开眼睛，发现自己躺在一片陌生的森林中。");
+    expect(chapters[1]?.title).toBe("遭遇魔兽");
+    expect(chapters[1]?.content).toBe("突然，一声咆哮从密林深处传来。");
+    expect(chapters[2]?.title).toBe("绝境求生");
+    expect(chapters[2]?.content).toBe("林轩咬紧牙关，握紧了手中的木棍。");
+  });
+
+  it("uses a 第N节 fallback title when section heading has no title text", () => {
+    const input = [
+      "第一节",
+      "",
+      "正文内容。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.title).toBe("第1节");
+  });
+
+  it("splits by traditional Chinese 第X節 headings", () => {
+    const input = [
+      "第一節 起因",
+      "",
+      "話說天下大勢，分久必合。",
+      "",
+      "第二節 經過",
+      "",
+      "且說那日之後，局勢驟變。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(2);
+    expect(chapters[0]?.title).toBe("起因");
+    expect(chapters[1]?.title).toBe("經過");
+  });
+
+  // ── Volume detection ──
+
+  it("groupChaptersByVolume detects single volume when no markers present", () => {
+    const chapters = [
+      { title: "第一章", content: "内容" },
+      { title: "第二章", content: "内容" },
+      { title: "第三章", content: "内容" },
+    ];
+
+    const volumes = groupChaptersByVolume(chapters);
+
+    expect(volumes).toHaveLength(1);
+    expect(volumes[0]?.volumeNumber).toBe(1);
+    expect(volumes[0]?.chapterCount).toBe(3);
+  });
+
+  it("groupChaptersByVolume detects volume markers in chapter titles", () => {
+    const chapters = [
+      { title: "第一卷 觉醒", content: "序幕内容" },
+      { title: "第一章 启程", content: "内容" },
+      { title: "第二章 相遇", content: "内容" },
+      { title: "第二卷 成长", content: "内容" },
+      { title: "第三章 修炼", content: "内容" },
+      { title: "第四章 突破", content: "内容" },
+    ];
+
+    const volumes = groupChaptersByVolume(chapters);
+
+    expect(volumes).toHaveLength(2);
+    expect(volumes[0]?.volumeNumber).toBe(1);
+    expect(volumes[0]?.title).toBe("觉醒");
+    expect(volumes[0]?.chapterCount).toBe(3);
+    expect(volumes[1]?.volumeNumber).toBe(2);
+    expect(volumes[1]?.title).toBe("成长");
+    expect(volumes[1]?.chapterCount).toBe(3);
+  });
+
+  it("groupChaptersByVolume detects volume markers in chapter content", () => {
+    const chapters = [
+      { title: "", content: "第一卷 风起\n\n这是第一章的内容。" },
+      { title: "", content: "这是第二章的内容。" },
+      { title: "", content: "第二卷 云涌\n\n这是第三章的内容。" },
+    ];
+
+    const volumes = groupChaptersByVolume(chapters);
+
+    expect(volumes).toHaveLength(2);
+    expect(volumes[0]?.volumeNumber).toBe(1);
+    expect(volumes[0]?.chapterCount).toBe(2);
+    expect(volumes[1]?.volumeNumber).toBe(2);
+    expect(volumes[1]?.chapterCount).toBe(1);
   });
 });
