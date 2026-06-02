@@ -336,42 +336,54 @@ export class PlannerAgent extends BaseAgent {
       }
     }
 
-    // Recover when the LLM truncated trailing sections (common with thinking
+    // Recover when the LLM truncated sections (common with thinking
     // models that exhaust their token budget). We auto-append default content
-    // for any combination of missing "## 本章 hook 账" and "## 不要做" —
-    // these are the two most frequently truncated sections because they sit
-    // at the end of the memo body.
+    // for any missing section. All 8 sections are recoverable — earlier
+    // versions only handled the two trailing sections, but during long imports
+    // the LLM can drop middle sections too.
     const missingMatch = parseErrorMessage.match(/^missing sections: (.+)$/);
     if (missingMatch) {
       const missingList = missingMatch[1]!.split(", ").map((s) => s.trim());
-      const recoverable = ["## 本章 hook 账", "## 不要做"];
       const isEnglish = trimmed.includes("## Current task");
-      const recoverableEn = ["## Hook ledger for this chapter", "## Do not"];
-      // Only recover if every missing section is one we can auto-fill
-      const allRecoverable = missingList.every(
-        (s) => recoverable.includes(s) || recoverableEn.includes(s),
-      );
-      if (allRecoverable) {
-        const fmMatch = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
-        if (fmMatch) {
-          const yamlText = fmMatch[1]!;
-          let body = fmMatch[2]!.trimEnd();
-          const needsHookLedger = missingList.includes("## 本章 hook 账")
-            || missingList.includes("## Hook ledger for this chapter");
-          const needsDoNot = missingList.includes("## 不要做")
-            || missingList.includes("## Do not");
-          if (needsHookLedger) {
-            const hookLedgerSection = isEnglish
-              ? "## Hook ledger for this chapter\nopen:\n- (none)\nadvance:\n- (none)\nresolve:\n- (none)\ndefer:\n- (none)"
-              : "## 本章 hook 账\nopen:\n- 无\nadvance:\n- 无\nresolve:\n- 无\ndefer:\n- 无";
-            body += `\n\n${hookLedgerSection}`;
-          }
-          if (needsDoNot) {
-            const doNotSection = isEnglish ? "## Do not\nNone." : "## 不要做\n无";
-            body += `\n\n${doNotSection}`;
-          }
-          return `---\n${yamlText}\n---\n${body}\n`;
+
+      const fmMatch = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (fmMatch) {
+        const yamlText = fmMatch[1]!;
+        let body = fmMatch[2]!.trimEnd();
+
+        // Default content for each recoverable section (zh / en pairs)
+        const defaults: Record<string, string> = {
+          "## 读者此刻在等什么": "1) 读者期待主角继续推进主线\n2) 本章继续推进",
+          "## 该兑现的 / 暂不掀的":
+            "- 该兑现：无明确兑现项\n- 暂不掀：无",
+          "## 日常/过渡承担什么任务":
+            "（由 writer 根据实际章节内容补充）",
+          "## 关键抉择过三连问":
+            "- 主角本章最关键的一次选择：\n  - 为什么这么做？\n  - 符合当前利益\n  - 符合人设",
+          "## 章尾必须发生的改变": "1. 主线推进",
+          "## 本章 hook 账":
+            "open:\n- 无\nadvance:\n- 无\nresolve:\n- 无\ndefer:\n- 无",
+          "## 不要做": "无",
+          "## Current task": "(by writer based on chapter content)",
+          "## What the reader is waiting for right now":
+            "1) Reader expects mainline to continue\n2) This chapter continues the mainline",
+          "## To pay off / to keep buried":
+            "- Pay off: none identified\n- Keep buried: none",
+          "## What the slow / transitional beats carry":
+            "(to be filled by writer based on actual chapter content)",
+          "## Three-question check on the key choice":
+            "- Protagonist's most important choice this chapter:\n  - Why this choice?\n  - Matches current interest\n  - Matches persona",
+          "## Required end-of-chapter change": "1. Mainline advance",
+          "## Hook ledger for this chapter":
+            "open:\n- (none)\nadvance:\n- (none)\nresolve:\n- (none)\ndefer:\n- (none)",
+          "## Do not": "None.",
+        };
+
+        for (const section of missingList) {
+          const defaultContent = defaults[section] ?? "(by writer)";
+          body += `\n\n${section}\n${defaultContent}`;
         }
+        return `---\n${yamlText}---\n${body}\n`;
       }
     }
 
