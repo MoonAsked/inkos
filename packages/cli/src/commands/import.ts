@@ -133,6 +133,7 @@ importCommand
       const fromStat = await stat(fromPath);
 
       let chapters: Array<{ title: string; content: string }>;
+      let rawTextForVolumes = "";
 
       if (fromStat.isDirectory()) {
         // Directory mode: read each .md/.txt file in sorted order
@@ -154,8 +155,8 @@ importCommand
         );
       } else {
         // Single file mode: split by chapter pattern
-        const text = await readFile(fromPath, "utf-8");
-        chapters = [...splitChapters(text, opts.split)];
+        rawTextForVolumes = await readFile(fromPath, "utf-8");
+        chapters = [...splitChapters(rawTextForVolumes, opts.split)];
 
         if (chapters.length === 0) {
           throw new Error(
@@ -170,8 +171,8 @@ importCommand
         if (opts.resumeFrom) {
           log(formatImportChaptersResume(language, opts.resumeFrom));
         }
-        // Detect and display volume structure
-        const volumes = groupChaptersByVolume(chapters);
+        // Detect and display volume structure (pass raw text for standalone volume markers)
+        const volumes = groupChaptersByVolume(chapters, rawTextForVolumes);
         if (volumes.length > 1) {
           log(language === "en" ? "  Volume structure detected:" : "  检测到分卷结构：");
           for (const v of volumes) {

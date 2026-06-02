@@ -344,45 +344,73 @@ function parseVolumeNumber(token: string): number {
  * chapter range it covers. If no volume markers are found, returns a single
  * volume containing all chapters.
  */
+/**
+ * Group already-split chapters by volume by scanning each chapter's title,
+ * content, and (optionally) the raw text for volume markers like
+ * "第X卷", "Volume X", "Vol. X".
+ *
+ * When `rawText` is provided, standalone volume markers in the preamble
+ * (before the first chapter) and between chapters are also detected.
+ *
+ * Returns an array of VolumeInfo describing each detected volume and the
+ * chapter range it covers. If no volume markers are found, returns a single
+ * volume containing all chapters.
+ */
 export function groupChaptersByVolume(
   chapters: ReadonlyArray<SplitChapter>,
+  rawText?: string,
 ): ReadonlyArray<VolumeInfo> {
-  const volumes: Array<{ volumeNumber: number; label: string; title: string; startIndex: number }> = [];
-  let lastVolumeNum = 1;
-  let lastVolumeTitle = "";
+  // Step 1: Scan chapter titles/content for volume markers
+  const volumes: Map<number, { label: string; title: string; startIndex: number }> = new Map();
 
   for (let i = 0; i < chapters.length; i++) {
     const ch = chapters[i]!;
     const searchText = ch.title.length > 0 ? ch.title : ch.content.slice(0, 200);
-    let foundVolume: number | null = null;
-    let foundTitle = "";
-
-    for (const pattern of VOLUME_DETECT_PATTERNS) {
-      const match = searchText.match(pattern);
-      if (match) {
-        foundVolume = parseVolumeNumber(match[1]!);
-        foundTitle = (match[2] ?? "").trim();
-        break;
-      }
-    }
-
-    if (foundVolume !== null) {
-      lastVolumeNum = foundVolume;
-      lastVolumeTitle = foundTitle;
-      // Only register a new volume entry if we haven't seen this volume number
-      if (!volumes.some((v) => v.volumeNumber === foundVolume)) {
-        volumes.push({
-          volumeNumber: foundVolume,
-          label: /^[a-z]/i.test(foundTitle) ? `Volume ${foundVolume}` : `第${foundVolume}卷`,
-          title: foundTitle,
-          startIndex: i,
-        });
-      }
+    const found = detectVolumeInText(searchText);
+    if (found !== null && !volumes.has(found.volumeNumber)) {
+      volumes.set(found.volumeNumber, {
+        label: /^[a-z]/i.test(found.title) ? `Volume ${found.volumeNumber}` : `第${found.volumeNumber}卷`,
+        title: found.title,
+        startIndex: i,
+      });
     }
   }
 
-  // If no volumes detected, wrap everything in one volume
-  if (volumes.length === 0) {
+  // Step 2: If rawText is provided, also scan standalone volume markers
+  // in the preamble and between chapters
+  if (rawText && chapters.length > 0) {
+    const lines = rawText.split("\n");
+
+    // Build a map from volume line positions to chapter indices
+    // by reversing the split logic: find where each chapter starts in the raw text
+    const chapterStartLines = findChapterStartLines(rawText, chapters);
+
+    for (let i = 0; i < lines.length; i++) {
+      const found = detectVolumeInText(lines[i]!);
+      if (found === null) continue;
+      if (volumes.has(found.volumeNumber)) continue;
+
+      // Determine which chapter this volume marker precedes
+      let targetChapter = -1;
+      for (let j = 0; j < chapterStartLines.length; j++) {
+        if (i < chapterStartLines[j]!) {
+          targetChapter = j;
+          break;
+        }
+      }
+      // If volume marker is before any chapter (preamble), map to chapter 0
+      if (targetChapter === -1) targetChapter = 0;
+
+      const volTitle = extractVolumeTitleFromRaw(lines, i + 1);
+      volumes.set(found.volumeNumber, {
+        label: `第${found.volumeNumber}卷`,
+        title: volTitle,
+        startIndex: targetChapter,
+      });
+    }
+  }
+
+  if (volumes.size === 0) {
     return [
       {
         volumeNumber: 1,
@@ -395,20 +423,101 @@ export function groupChaptersByVolume(
     ];
   }
 
-  // Build the final volume info with chapter ranges
+  // Sort by volume number and build result
+  const sorted = [...volumes.entries()].sort((a, b) => a[0] - b[0]);
   const result: VolumeInfo[] = [];
-  for (let v = 0; v < volumes.length; v++) {
-    const vol = volumes[v]!;
-    const nextStart = v + 1 < volumes.length ? volumes[v + 1]!.startIndex : chapters.length;
+  for (let v = 0; v < sorted.length; v++) {
+    const [volNum, info] = sorted[v]!;
+    const nextStart = v + 1 < sorted.length ? sorted[v + 1]![1].startIndex : chapters.length;
     result.push({
-      volumeNumber: vol.volumeNumber,
-      label: vol.label,
-      title: vol.title,
-      chapterStart: vol.startIndex,
+      volumeNumber: volNum,
+      label: info.label,
+      title: info.title,
+      chapterStart: info.startIndex,
       chapterEnd: nextStart - 1,
-      chapterCount: nextStart - vol.startIndex,
+      chapterCount: nextStart - info.startIndex,
     });
   }
 
   return result;
+}
+
+function detectVolumeInText(text: string): { volumeNumber: number; title: string } | null {
+  for (const pattern of VOLUME_DETECT_PATTERNS) {
+    const match = text.match(pattern);
+    if (match) {
+      return {
+        volumeNumber: parseVolumeNumber(match[1]!),
+        title: (match[2] ?? "").trim(),
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the line number in the raw text where each chapter begins.
+ * This reverse-engineers splitChapters' logic to map chapter indices
+ * back to raw text line positions.
+ */
+function findChapterStartLines(
+  rawText: string,
+  chapters: ReadonlyArray<SplitChapter>,
+): number[] {
+  const lines = rawText.split("\n");
+  const result: number[] = [];
+  let currentLine = 0;
+
+  for (const ch of chapters) {
+    // Search forward from currentLine to find the chapter's title in the raw text
+    // Chapter title lines in raw text are those that would match the split pattern
+    const titleLine = ch.title.length > 0
+      ? findLineContaining(lines, ch.title, currentLine)
+      : -1;
+
+    if (titleLine >= 0) {
+      result.push(titleLine);
+      currentLine = titleLine + 1;
+    } else {
+      // Fallback: try to find the chapter content in the raw text
+      const firstLine = ch.content.split("\n")[0]!.trim();
+      if (firstLine) {
+        const contentLine = findLineContaining(lines, firstLine, currentLine);
+        if (contentLine >= 0) {
+          // Content starts after the title line, so chapter start is one line before
+          result.push(Math.max(0, contentLine - 1));
+          currentLine = contentLine;
+        } else {
+          result.push(currentLine);
+        }
+      } else {
+        result.push(currentLine);
+      }
+    }
+  }
+
+  return result;
+}
+
+function findLineContaining(lines: string[], needle: string, startFrom: number): number {
+  const trimmed = needle.trim();
+  if (!trimmed) return -1;
+  for (let i = startFrom; i < lines.length; i++) {
+    if (lines[i]!.includes(trimmed)) return i;
+  }
+  return -1;
+}
+
+/**
+ * When a raw volume marker is found (e.g. "第一卷"), the next non-empty
+ * line often contains the volume title (e.g. "魔性不改").
+ */
+function extractVolumeTitleFromRaw(lines: string[], nextLineIdx: number): string {
+  for (let i = nextLineIdx; i < Math.min(nextLineIdx + 3, lines.length); i++) {
+    const line = lines[i]!.trim().replace(/\r$/, "");
+    // Stop if the next line is a chapter heading (contains 第...节/章/回)
+    if (/^第\s*\d*\s*[节節章回]/.test(line)) break;
+    if (line && line.length > 0) return line;
+  }
+  return "";
 }

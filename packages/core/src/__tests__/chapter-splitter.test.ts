@@ -436,4 +436,55 @@ describe("splitChapters", () => {
     expect(volumes[1]?.volumeNumber).toBe(2);
     expect(volumes[1]?.chapterCount).toBe(1);
   });
+
+  it("groupChaptersByVolume with rawText detects standalone volume markers in preamble", () => {
+    const rawText = [
+      "序言内容...",
+      "",
+      "第一卷",
+      "魔性不改",
+      "第一节 觉醒",
+      "故事开始。",
+      "",
+      "第二节 出发",
+      "踏上旅程。",
+      "",
+      "第二卷",
+      "魔子出山",
+      "第一节 新篇章",
+      "新的开始。",
+    ].join("\n");
+
+    const chapters = [
+      { title: "觉醒", content: "故事开始。" },
+      { title: "出发", content: "踏上旅程。" },
+      { title: "新篇章", content: "新的开始。" },
+    ];
+
+    const volumes = groupChaptersByVolume(chapters, rawText);
+
+    expect(volumes).toHaveLength(2);
+    expect(volumes[0]?.volumeNumber).toBe(1);
+    expect(volumes[0]?.title).toBe("魔性不改");
+    expect(volumes[0]?.chapterCount).toBe(2);
+    expect(volumes[1]?.volumeNumber).toBe(2);
+    expect(volumes[1]?.title).toBe("魔子出山");
+    expect(volumes[1]?.chapterCount).toBe(1);
+  });
+
+  it("groupChaptersByVolume without rawText still detects inline volume markers", () => {
+    const chapters = [
+      { title: "第一卷 觉醒", content: "故事开始。" },
+      { title: "第一章", content: "出发。" },
+      { title: "第二卷 风云", content: "新的开始。" },
+    ];
+
+    const volumes = groupChaptersByVolume(chapters);
+
+    expect(volumes).toHaveLength(2);
+    expect(volumes[0]?.volumeNumber).toBe(1);
+    expect(volumes[0]?.chapterCount).toBe(2);
+    expect(volumes[1]?.volumeNumber).toBe(2);
+    expect(volumes[1]?.chapterCount).toBe(1);
+  });
 });
