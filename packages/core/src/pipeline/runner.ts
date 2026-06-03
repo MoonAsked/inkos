@@ -436,9 +436,15 @@ export class PipelineRunner {
     readonly language: "zh" | "en";
     readonly stageLanguage: LengthLanguage;
     readonly maxRetries?: number;
+    readonly skipReview?: boolean;
   }): Promise<ArchitectOutput> {
     const maxRetries = params.maxRetries ?? this.config.foundationReviewRetries ?? 2;
-    this.logDebug(`[pipeline] generateAndReviewFoundation: mode=${params.mode}, language=${params.language}, maxRetries=${maxRetries}`);
+    this.logDebug(`[pipeline] generateAndReviewFoundation: mode=${params.mode}, language=${params.language}, maxRetries=${maxRetries}, skipReview=${params.skipReview}`);
+
+    if (params.skipReview) {
+      return await params.generate();
+    }
+
     let foundation = await params.generate();
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -2601,15 +2607,13 @@ ${matrix}`,
 
         const architect = new ArchitectAgent(this.agentCtxFor("architect", input.bookId));
         const isSeries = input.importMode === "series";
+        /** In import mode, the foundation is reverse-engineered from existing
+         *  chapters — it's descriptive, not creative. Skip the quality review
+         *  loop (foundation reviewer) to avoid wasteful retries on content
+         *  that already exists in the source text. */
         let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
         try {
-          foundation = await this.generateAndReviewFoundation({
-            generate: (reviewFeedback) => architect.generateFoundationFromImport(book, sampledText, undefined, reviewFeedback, { importMode: isSeries ? "series" : undefined }),
-            reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
-            mode: isSeries ? "series" : "original",
-            language: resolvedLanguage === "en" ? "en" : "zh",
-            stageLanguage: resolvedLanguage,
-          });
+          foundation = await architect.generateFoundationFromImport(book, sampledText, undefined, undefined, { importMode: isSeries ? "series" : undefined });
         } catch (step1Error) {
           // If Step 1 foundation generation is blocked by content_filter,
           // retry with only chapter titles (no prose) so the architect can
@@ -2626,13 +2630,7 @@ ${matrix}`,
               ? `Chapter ${i + 1}: ${c.title}`
               : `第${i + 1}章 ${c.title}`,
           ).join("\n");
-          foundation = await this.generateAndReviewFoundation({
-            generate: (reviewFeedback) => architect.generateFoundationFromImport(book, titleOnlyText, undefined, reviewFeedback, { importMode: isSeries ? "series" : undefined }),
-            reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
-            mode: isSeries ? "series" : "original",
-            language: resolvedLanguage === "en" ? "en" : "zh",
-            stageLanguage: resolvedLanguage,
-          });
+          foundation = await architect.generateFoundationFromImport(book, titleOnlyText, undefined, undefined, { importMode: isSeries ? "series" : undefined });
         }
         await architect.writeFoundationFiles(
           bookDir,
