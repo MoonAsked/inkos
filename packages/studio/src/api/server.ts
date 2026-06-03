@@ -30,6 +30,7 @@ import {
   loadSecrets,
   saveSecrets,
   listModelsForService,
+  isApiKeyOptionalForEndpoint,
   getAllEndpoints,
   probeModelsFromUpstream,
   fetchWithProxy,
@@ -1335,13 +1336,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       stream?: boolean;
     }>();
 
-    if (!apiKey?.trim()) {
-      return c.json({ ok: false, error: "API Key 不能为空" }, 400);
-    }
-
     const resolvedBaseUrl = await resolveConfiguredServiceBaseUrl(root, service, baseUrl);
     if (!resolvedBaseUrl) {
       return c.json({ ok: false, error: `未知服务商: ${service}` }, 400);
+    }
+
+    const baseService = isCustomServiceId(service) ? "custom" : service;
+    const apiKeyOptional = isApiKeyOptionalForEndpoint({
+      provider: resolveServiceProviderFamily(baseService) ?? "openai",
+      baseUrl: resolvedBaseUrl,
+    });
+    if (!apiKey?.trim() && !apiKeyOptional) {
+      return c.json({ ok: false, error: "API Key 不能为空" }, 400);
     }
 
     const rawConfig = await loadRawConfig(root).catch(() => ({} as Record<string, unknown>));
@@ -1349,7 +1355,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const probe = await probeServiceCapabilities({
       root,
       service,
-      apiKey: apiKey.trim(),
+      apiKey: apiKey?.trim() ?? "",
       baseUrl: resolvedBaseUrl,
       preferredApiFormat: apiFormat,
       preferredStream: stream,
@@ -1467,10 +1473,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const secrets = await loadSecrets(root);
     const apiKey = c.req.query("apiKey") || secrets.services[service]?.apiKey || "";
 
-    // No key = no models
-    if (!apiKey) return c.json({ models: [] });
-
     const resolvedBaseUrl = await resolveConfiguredServiceBaseUrl(root, service);
+    const baseService = isCustomServiceId(service) ? "custom" : service;
+    const apiKeyOptional = isApiKeyOptionalForEndpoint({
+      provider: resolveServiceProviderFamily(baseService) ?? "openai",
+      baseUrl: resolvedBaseUrl,
+    });
+
+    // No key = no models, except local/self-hosted endpoints such as Ollama.
+    if (!apiKey && !apiKeyOptional) return c.json({ models: [] });
 
     // Cache by service + resolved baseUrl + apiKey fingerprint; valid for 10 min unless ?refresh=1
     const cacheKey = `${service}::${resolvedBaseUrl ?? ""}::${apiKey.slice(-8)}`;

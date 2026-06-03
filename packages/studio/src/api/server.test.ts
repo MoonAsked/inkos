@@ -47,6 +47,7 @@ const SERVICE_PRESETS_MOCK: Record<string, ServicePresetMock> = {
   minimax: { providerFamily: "anthropic", baseUrl: "https://api.minimaxi.com/anthropic", modelsBaseUrl: "https://api.minimaxi.com/anthropic", knownModels: [] as string[] },
   bailian: { providerFamily: "anthropic", baseUrl: "https://dashscope.aliyuncs.com/apps/anthropic", modelsBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", knownModels: [] as string[] },
   google: { providerFamily: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", modelsBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", knownModels: [] as string[] },
+  ollama: { providerFamily: "openai", baseUrl: "http://localhost:11434/v1", modelsBaseUrl: "http://localhost:11434/v1", knownModels: [] as string[] },
   custom: { providerFamily: "openai", baseUrl: "", knownModels: [] as string[] },
 };
 const resolveServicePresetMock = vi.fn((service: string) => SERVICE_PRESETS_MOCK[service]);
@@ -62,9 +63,10 @@ const listModelsForServiceMock = vi.fn(async (service: string, apiKey?: string, 
     return preset.knownModels.map((id) => ({ id, name: id, reasoning: false, contextWindow: 0 }));
   }
   const modelsBaseUrl = liveBaseUrl ?? resolveServiceModelsBaseUrlMock(service);
-  if (!apiKey || !modelsBaseUrl) return [];
+  const allowsNoKey = Boolean(modelsBaseUrl?.startsWith("http://localhost") || modelsBaseUrl?.startsWith("http://127.0.0.1"));
+  if ((!apiKey && !allowsNoKey) || !modelsBaseUrl) return [];
   const res = await fetch(`${modelsBaseUrl.replace(/\/$/, "")}/models`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) return [];
@@ -227,6 +229,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     resolveServiceProviderFamily: resolveServiceProviderFamilyMock,
     resolveServiceModelsBaseUrl: resolveServiceModelsBaseUrlMock,
     resolveServiceModel: resolveServiceModelMock,
+    isApiKeyOptionalForEndpoint: actual.isApiKeyOptionalForEndpoint,
     loadSecrets: loadSecretsMock,
     saveSecrets: saveSecretsMock,
     getServiceApiKey: getServiceApiKeyMock,
