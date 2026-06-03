@@ -161,7 +161,7 @@ importCommand
         if (chapters.length === 0) {
           throw new Error(
             `No chapters found in ${fromPath}. ` +
-            `Default pattern matches "第X章", "第X节", and "Chapter X". Use --split to provide a custom regex.`,
+            `Default pattern matches "第X章", "第X节", "第X幕", and "Chapter X". Use --split to provide a custom regex.`,
           );
         }
       }

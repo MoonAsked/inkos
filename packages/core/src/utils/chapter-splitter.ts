@@ -22,6 +22,7 @@ export interface VolumeInfo {
  * - "第一节 xxxx" / "第1节 xxxx" (section as chapter)
  * - "第一節 xxxx" / "第1節 xxxx" (traditional Chinese)
  * - "第一回 xxxx" / "第1回 xxxx"
+ * - "第一幕 xxxx" / "第1幕 xxxx" (act as chapter)
  * - "# 第1章 xxxx" / "## 第23章 xxxx"
  * - "CHAPTER I." / "CHAPTER II."
  * - "001章 xxxx" / "1234章 xxxx" (bare number + 章, no 第 prefix)
@@ -39,7 +40,7 @@ export function splitChapters(
   // Group 1: title after 第X章/第X回/第X节
   // Group 2: title after Chapter N
   // Group 3: full match for bare NNN章 (no 第 prefix) — title extracted separately
-  const defaultPattern = /^#{0,2}\s*(?:第[零〇○Ｏ０一二三四五六七八九十百千万\d]+卷?\d*(?:章|回|节|節)(?:[:：]|\s+)?\s*(.*)|Chapter\s+(?:\d+|[IVXLCDM]+)(?:\.|:|\s+)?\s*(.*)|(\d{2,4}章\s*\S.*))/i;
+  const defaultPattern = /^#{0,2}\s*(?:第[零〇○Ｏ０一二三四五六七八九十百千万\d]+卷?\d*(?:章|回|节|節|幕)(?:[:：]|\s+)?\s*(.*)|Chapter\s+(?:\d+|[IVXLCDM]+)(?:\.|:|\s+)?\s*(.*)|(\d{2,4}章\s*\S.*))/i;
   const regex = pattern ? new RegExp(pattern, "m") : defaultPattern;
 
   const lines = text.split("\n");
@@ -304,6 +305,10 @@ function inferFallbackTitle(headingLine: string, chapterNumber: number): string 
 
   if (/第[零一二三四五六七八九十百千万\d]+[节節]/.test(headingLine)) {
     return `第${chapterNumber}节`;
+  }
+
+  if (/第[零一二三四五六七八九十百千万\d]+幕/.test(headingLine)) {
+    return `第${chapterNumber}幕`;
   }
 
   return `第${chapterNumber}章`;

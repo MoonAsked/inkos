@@ -325,6 +325,67 @@ describe("splitChapters", () => {
     expect(chapters[0]?.content).toContain("杨洛拍拍肩膀。");
   });
 
+  // ── Act (幕) splitting ──
+
+  it("splits by 第X幕 headings by default", () => {
+    const input = [
+      "第一幕 卡塞尔之门",
+      "",
+      "路明非在屏幕上无奈地打出GG。",
+      "",
+      "第二幕 神秘的学院",
+      "",
+      "这是一所位于美国伊利诺伊州的私立大学。",
+      "",
+      "第三幕 自由一日",
+      "",
+      "所有人看向外面。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(3);
+    expect(chapters[0]?.title).toBe("卡塞尔之门");
+    expect(chapters[0]?.content).toBe("路明非在屏幕上无奈地打出GG。");
+    expect(chapters[1]?.title).toBe("神秘的学院");
+    expect(chapters[1]?.content).toBe("这是一所位于美国伊利诺伊州的私立大学。");
+    expect(chapters[2]?.title).toBe("自由一日");
+    expect(chapters[2]?.content).toBe("所有人看向外面。");
+  });
+
+  it("uses a 第N幕 fallback title when act heading has no title text", () => {
+    const input = [
+      "第一幕",
+      "",
+      "正文内容。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0]?.title).toBe("第1幕");
+  });
+
+  it("splits by 第X幕 headings with Chinese numerals", () => {
+    const input = [
+      "第七幕 星与花",
+      "",
+      "星辰在夜空中闪烁。",
+      "",
+      "第十幕 七宗罪",
+      "",
+      "审判即将开始。",
+    ].join("\n");
+
+    const chapters = splitChapters(input);
+
+    expect(chapters).toHaveLength(2);
+    expect(chapters[0]?.title).toBe("星与花");
+    expect(chapters[0]?.content).toBe("星辰在夜空中闪烁。");
+    expect(chapters[1]?.title).toBe("七宗罪");
+    expect(chapters[1]?.content).toBe("审判即将开始。");
+  });
+
   // ── Section (节) splitting ──
 
   it("splits by 第X节 headings by default", () => {
