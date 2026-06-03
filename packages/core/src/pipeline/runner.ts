@@ -2596,13 +2596,10 @@ ${matrix}`,
 
         const architect = new ArchitectAgent(this.agentCtxFor("architect", input.bookId));
         const isSeries = input.importMode === "series";
-        const foundation = await this.generateAndReviewFoundation({
-          generate: (reviewFeedback) => architect.generateFoundationFromImport(book, foundationSource, undefined, reviewFeedback, { importMode: isSeries ? "series" : undefined }),
-          reviewer: new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", input.bookId)),
-          mode: isSeries ? "series" : "original",
-          language: resolvedLanguage === "en" ? "en" : "zh",
-          stageLanguage: resolvedLanguage,
-        });
+        /** In import mode, the foundation is reverse-engineered from existing
+         *  chapters — it's descriptive, not creative. Skip the quality review
+         *  loop to avoid wasteful retries on content that already exists. */
+        const foundation = await architect.generateFoundationFromImport(book, foundationSource, undefined, undefined, { importMode: isSeries ? "series" : undefined });
         await architect.writeFoundationFiles(
           bookDir,
           foundation,
