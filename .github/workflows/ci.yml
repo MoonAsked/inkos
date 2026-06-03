@@ -2,11 +2,25 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, uncertain]
   pull_request:
-    branches: [master, main]
+    branches: [master, main, uncertain]
 
 jobs:
+  verify-uncertain-sync:
+    if: github.ref_name == 'uncertain' || github.base_ref == 'uncertain'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch master audit source
+        run: git fetch --no-tags origin master:refs/remotes/origin/master
+
+      - name: Verify master history is traceable
+        run: node scripts/verify-branch-sync.mjs origin/master HEAD
+
   build-and-test:
     runs-on: ${{ matrix.os }}
     strategy:
