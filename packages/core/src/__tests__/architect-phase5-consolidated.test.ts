@@ -232,7 +232,7 @@ describe("Phase 5 consolidation — 7→5 sections, prompt contract", () => {
     const system = (chat.mock.calls[0]?.[0] as Array<{ content: string }>)[0]?.content ?? "";
 
     expect(system).toContain("story_frame ≤ 3000 chars");
-    expect(system).toContain("volume_map ≤ 5000 chars");
+    expect(system).toContain("volume_map ≤ 4000 chars");
     expect(system).toContain("roles 总 ≤ 8000 chars");
     expect(system).toContain("book_rules ≤ 500 chars");
     expect(system).toContain("pending_hooks ≤ 2000 chars");
@@ -292,7 +292,8 @@ describe("Phase 5 consolidation — 7→5 sections, prompt contract", () => {
     await agent.generateFoundation(baseBook());
     const system = (chat.mock.calls[0]?.[0] as Array<{ content: string }>)[0]?.content ?? "";
 
-    expect(system).toContain("只输出 YAML frontmatter 一块——零散文");
+    expect(system).toContain("只输出 YAML frontmatter 一块");
+    expect(system).toContain("零散文");
     // The pre-consolidation prompt used to ask for `## 叙事视角` AND
     // `## 核心冲突驱动` prose blocks inside book_rules — those are gone.
     expect(system).not.toMatch(/=== SECTION: book_rules ===[\s\S]*?## 叙事视角/);

@@ -2905,6 +2905,7 @@ ${matrix}`,
     );
 
     return {
+      externalContext,
       chapterIntent: plan.intentMarkdown,
       chapterMemo: plan.memo,
       chapterIntentData: plan.intent,

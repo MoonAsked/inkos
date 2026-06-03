@@ -383,7 +383,7 @@ export class PlannerAgent extends BaseAgent {
           const defaultContent = defaults[section] ?? "(by writer)";
           body += `\n\n${section}\n${defaultContent}`;
         }
-        return `---\n${yamlText}---\n${body}\n`;
+        return `---\n${yamlText}\n---\n${body}\n`;
       }
     }
 

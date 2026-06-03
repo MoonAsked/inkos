@@ -150,8 +150,8 @@ function toModelInfo(inkosModel: { id: string; maxOutput: number; contextWindowT
 
 /**
  * listModelsForService（R4 精修）：
- * - 先试 live /models probe（如果 baseUrl + apiKey 具备）
- * - probe 失败或无 apiKey：fallback 到 provider.models（inkos bank）
+ * - 先试 live /models probe（如果 baseUrl + apiKey 具备；Ollama 本地探测不需要 apiKey）
+ * - probe 失败或无 apiKey：fallback 到 provider.models（inkos bank，Ollama 除外）
  * - 不再做 INKOS_LLM_MODEL env 补丁（会污染跨 service 菜单；bank 已足够全）
  *
  * custom / newapi / higress 等 baseUrl 空的 gateway provider：
@@ -171,8 +171,8 @@ export async function listModelsForService(
   // 1) 先试 live /models probe
   const probeBaseUrl = liveBaseUrl || provider?.modelsBaseUrl || provider?.baseUrl || resolveServiceModelsBaseUrl(service);
   const providerFamily = preset?.providerFamily ?? (provider?.api.startsWith("anthropic") ? "anthropic" : "openai");
-  if (apiKey && probeBaseUrl) {
-    const probed = await probeModelsFromUpstream(probeBaseUrl, apiKey, 10_000);
+  if ((apiKey || service === "ollama") && probeBaseUrl) {
+    const probed = await probeModelsFromUpstream(probeBaseUrl, apiKey ?? "", 10_000);
     if (probed.length > 0) {
       const { lookupModel } = await import("./providers/lookup.js");
       for (const m of probed) {
