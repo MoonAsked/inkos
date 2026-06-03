@@ -73,6 +73,15 @@ function makeTextStream(text: string): AsyncIterable<Record<string, unknown>> {
   ]);
 }
 
+/** Stream that emits only thinking_delta and then done. */
+function makeThinkingStream(thinking: string): AsyncIterable<Record<string, unknown>> {
+  const msg = makeAssistantMessage("");
+  return makeEventStream([
+    { type: "thinking_delta", contentIndex: 0, delta: thinking, partial: msg },
+    { type: "done", reason: "stop", message: msg },
+  ]);
+}
+
 /** Stream that emits only done with empty content. */
 function makeEmptyStream(): AsyncIterable<Record<string, unknown>> {
   const msg = makeAssistantMessage("");
@@ -158,6 +167,55 @@ describe("chatCompletion via pi-ai", () => {
     expect(result.usage.completionTokens).toBe(7);
     expect(result.usage.totalTokens).toBe(18);
     expect(mockStreamSimple).toHaveBeenCalledOnce();
+  });
+
+  it("extracts section output from thinking-only streams when a real section block exists", async () => {
+    const sectionText = [
+      "I will now write the final answer.",
+      "=== SECTION: story_frame ===",
+      "真实故事框架内容".repeat(8),
+      "",
+      "=== SECTION: volume_map ===",
+      "真实卷纲内容".repeat(8),
+    ].join("\n");
+    mockStreamSimple.mockReturnValue(makeThinkingStream(sectionText));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const client = makeClient();
+    const result = await chatCompletion(client, "test-model", [
+      { role: "user", content: "architect" },
+    ]);
+
+    expect(result.content).toMatch(/^=== SECTION: story_frame ===/);
+    expect(result.content).not.toContain("I will now write");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("extracted"));
+    const warningText = warn.mock.calls.flat().join("\n");
+    expect(warningText).not.toContain("thinking_delta tail");
+    expect(warningText).not.toContain("extracted preview");
+    expect(warningText).not.toContain("真实故事框架内容");
+    warn.mockRestore();
+  });
+
+  it("does not treat reasoning-only section references as final answer", async () => {
+    const reasoningOnly = [
+      "I need to follow the required format.",
+      "=== SECTION: ... ===`).",
+      "    * Constraint: roles must use ---ROLE--- blocks.",
+      "=== SECTION: story_frame ===",
+      "    * I will keep story_frame completed and only ask for the missing sections.",
+      "    * Output must include volume_map and roles next.",
+    ].join("\n");
+    mockStreamSimple.mockReturnValue(makeThinkingStream(reasoningOnly));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const client = makeClient();
+    const error = await captureError(
+      chatCompletion(client, "test-model", [{ role: "user", content: "architect" }]),
+    );
+
+    expect(error.message).toContain("empty response");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("no final answer could be extracted"));
+    warn.mockRestore();
   });
 
   it("throws when stream produces no text content", async () => {

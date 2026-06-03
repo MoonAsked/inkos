@@ -1,5 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import YAML from "js-yaml";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import { readBookRules as readAuthoritativeBookRules } from "./rules-reader.js";
@@ -147,7 +148,7 @@ export class PlannerAgent extends BaseAgent {
       language: input.book.language ?? "zh",
     });
 
-    // memo.goal is LLM-produced and specific (<=50 chars, validated).
+    // memo.goal is LLM-produced and specific (<=80 chars, validated).
     // Overwrite intent.goal so downstream composer/retrieval gets the
     // concrete task statement instead of the outline-derived fallback.
     intent.goal = memo.goal;
@@ -241,16 +242,34 @@ export class PlannerAgent extends BaseAgent {
     let lastError: PlannerParseError | undefined;
 
     for (let attempt = 0; attempt < MEMO_RETRY_LIMIT; attempt += 1) {
-      const response = await this.chat(
-        [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: currentUserMessage },
-        ],
-        { temperature: 0.7 },
-      );
+      let response: { content: string };
+      try {
+        response = await this.chat(
+          [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: currentUserMessage },
+          ],
+          { temperature: 0.7 },
+        );
+      } catch (chatError: any) {
+        // Retry on empty LLM response (common with thinking/reasoning models
+        // that put all output in thinking_delta but extractAnswerFromReasoning
+        // fails to recover the structured content).
+        const errMsg = chatError?.message ?? "";
+        if (errMsg.includes("empty response") && attempt < MEMO_RETRY_LIMIT - 1) {
+          this.log?.warn(`[planner] LLM returned empty response (attempt ${attempt + 1}/${MEMO_RETRY_LIMIT}), retrying...`);
+          continue;
+        }
+        throw chatError;
+      }
 
       try {
-        return parseMemo(response.content, input.chapterNumber, input.isGoldenOpening);
+        return this.parseMemoWithProviderRecovery(
+          response.content,
+          input.chapterNumber,
+          input.isGoldenOpening,
+          input.fallbackGoal,
+        );
       } catch (error) {
         if (!(error instanceof PlannerParseError)) {
           throw error;
@@ -262,6 +281,256 @@ export class PlannerAgent extends BaseAgent {
     }
 
     throw lastError ?? new PlannerParseError("memo planner exhausted retries without a specific error");
+  }
+
+  private parseMemoWithProviderRecovery(
+    raw: string,
+    chapterNumber: number,
+    isGoldenOpening: boolean,
+    fallbackGoal: string,
+  ): ChapterMemo {
+    try {
+      return parseMemo(raw, chapterNumber, isGoldenOpening);
+    } catch (error) {
+      if (!(error instanceof PlannerParseError)) {
+        throw error;
+      }
+      const recovered = this.recoverProviderExtractedMemo(raw, chapterNumber, fallbackGoal, error.message);
+      if (!recovered) {
+        throw error;
+      }
+      return parseMemo(recovered, chapterNumber, isGoldenOpening);
+    }
+  }
+
+  private recoverProviderExtractedMemo(
+    raw: string,
+    chapterNumber: number,
+    fallbackGoal: string,
+    parseErrorMessage: string,
+  ): string | undefined {
+    const trimmed = raw.trim();
+    const safeGoal = this.truncateMemoGoal(fallbackGoal);
+
+    if (/chapter mismatch: expected \d+, got 0/.test(parseErrorMessage)) {
+      const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (!match) return undefined;
+      const yamlText = match[1]!;
+      const body = match[2]!;
+      const fixedYaml = yamlText
+        .replace(/^chapter\s*:\s*0\s*$/m, `chapter: ${chapterNumber}`)
+        .replace(/^goal\s*:\s*["']?\(auto-extracted\)["']?\s*$/m, `goal: ${JSON.stringify(safeGoal)}`);
+      return `---\n${fixedYaml}\n---\n${body}`;
+    }
+
+    // Recover from invalid YAML in frontmatter — most commonly caused by
+    // inconsistent indentation in threadRefs list items (e.g. "- H03" at
+    // indent 0 vs "  - S004" at indent 2). Re-normalize the YAML and retry.
+    if (parseErrorMessage.startsWith("invalid YAML in frontmatter")) {
+      const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (match) {
+        const fixedYaml = this.repairMemoYaml(match[1]!);
+        if (fixedYaml) {
+          return `---\n${fixedYaml}\n---\n${match[2]}`;
+        }
+      }
+    }
+
+    // Recover when the LLM truncated sections (common with thinking
+    // models that exhaust their token budget). We auto-append default content
+    // for any missing section. All 8 sections are recoverable — earlier
+    // versions only handled the two trailing sections, but during long imports
+    // the LLM can drop middle sections too.
+    const missingMatch = parseErrorMessage.match(/^missing sections: (.+)$/);
+    if (missingMatch) {
+      const missingList = missingMatch[1]!.split(", ").map((s) => s.trim());
+      const isEnglish = trimmed.includes("## Current task");
+
+      const fmMatch = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+      if (fmMatch) {
+        const yamlText = fmMatch[1]!;
+        let body = fmMatch[2]!.trimEnd();
+
+        // Default content for each recoverable section (zh / en pairs)
+        const defaults: Record<string, string> = {
+          "## 读者此刻在等什么": "1) 读者期待主角继续推进主线\n2) 本章继续推进",
+          "## 该兑现的 / 暂不掀的":
+            "- 该兑现：无明确兑现项\n- 暂不掀：无",
+          "## 日常/过渡承担什么任务":
+            "（由 writer 根据实际章节内容补充）",
+          "## 关键抉择过三连问":
+            "- 主角本章最关键的一次选择：\n  - 为什么这么做？\n  - 符合当前利益\n  - 符合人设",
+          "## 章尾必须发生的改变": "1. 主线推进",
+          "## 本章 hook 账":
+            "open:\n- 无\nadvance:\n- 无\nresolve:\n- 无\ndefer:\n- 无",
+          "## 不要做": "无",
+          "## Current task": "(by writer based on chapter content)",
+          "## What the reader is waiting for right now":
+            "1) Reader expects mainline to continue\n2) This chapter continues the mainline",
+          "## To pay off / to keep buried":
+            "- Pay off: none identified\n- Keep buried: none",
+          "## What the slow / transitional beats carry":
+            "(to be filled by writer based on actual chapter content)",
+          "## Three-question check on the key choice":
+            "- Protagonist's most important choice this chapter:\n  - Why this choice?\n  - Matches current interest\n  - Matches persona",
+          "## Required end-of-chapter change": "1. Mainline advance",
+          "## Hook ledger for this chapter":
+            "open:\n- (none)\nadvance:\n- (none)\nresolve:\n- (none)\ndefer:\n- (none)",
+          "## Do not": "None.",
+        };
+
+        for (const section of missingList) {
+          const defaultContent = defaults[section] ?? "(by writer)";
+          body += `\n\n${section}\n${defaultContent}`;
+        }
+        return `---\n${yamlText}---\n${body}\n`;
+      }
+    }
+
+    if (parseErrorMessage !== "missing YAML frontmatter delimiters") {
+      return undefined;
+    }
+
+    const bodyStart = this.findPlannerMemoBodyStart(trimmed);
+    if (bodyStart < 0) {
+      return undefined;
+    }
+    const body = trimmed.slice(bodyStart).trim();
+    return [
+      "---",
+      `chapter: ${chapterNumber}`,
+      `goal: ${JSON.stringify(safeGoal)}`,
+      "threadRefs: []",
+      "---",
+      body,
+    ].join("\n");
+  }
+
+  /**
+   * Attempt to repair common YAML frontmatter issues produced by LLMs:
+   * - Inconsistent indentation in list values (e.g. threadRefs items)
+   * - Mixed dash-indent styles ("- item" vs "  - item")
+   *
+   * Instead of trying to patch the broken YAML text, we parse what we can
+   * line-by-line and re-emit a clean YAML string. This is more robust than
+   * regex-based patching for the planner's small, known schema.
+   *
+   * Returns the repaired YAML string, or undefined if repair fails.
+   */
+  private repairMemoYaml(yamlText: string): string | undefined {
+    try {
+      const lines = yamlText.split("\n");
+
+      // Extract scalar fields by simple key: value matching
+      let chapter: number | undefined;
+      let goal: string | undefined;
+      let isGoldenOpening: boolean | undefined;
+
+      // Extract list items for threadRefs: collect all "- ID" lines that
+      // appear after a "threadRefs:" key, regardless of indentation.
+      let inThreadRefs = false;
+      const threadRefIds: string[] = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+
+        // Detect threadRefs key
+        if (/^threadRefs\s*:\s*$/.test(trimmed)) {
+          inThreadRefs = true;
+          continue;
+        }
+        // threadRefs: [] inline form
+        const inlineThreadRefs = trimmed.match(/^threadRefs\s*:\s*\[\]\s*$/);
+        if (inlineThreadRefs) {
+          inThreadRefs = false;
+          continue;
+        }
+
+        // Any other key resets threadRefs tracking
+        if (/^[a-zA-Z_]\w*\s*:/.test(trimmed) && !/^threadRefs/.test(trimmed)) {
+          inThreadRefs = false;
+        }
+
+        if (inThreadRefs) {
+          const itemMatch = trimmed.match(/^-\s+([A-Za-z0-9_-]+)\s*$/);
+          if (itemMatch) {
+            threadRefIds.push(itemMatch[1]!);
+            continue;
+          }
+          // If it's not a list item, we've left the threadRefs block
+          inThreadRefs = false;
+        }
+
+        // Extract scalar fields
+        const chapterMatch = trimmed.match(/^chapter\s*:\s*(\d+)\s*$/);
+        if (chapterMatch) {
+          chapter = Number(chapterMatch[1]);
+          continue;
+        }
+        const goalMatch = trimmed.match(/^goal\s*:\s*["'](.+)["']\s*$/);
+        if (goalMatch) {
+          goal = goalMatch[1];
+          continue;
+        }
+        const goalUnquoted = trimmed.match(/^goal\s*:\s*(.+)\s*$/);
+        if (goalUnquoted && !goal) {
+          goal = goalUnquoted[1]!.trim();
+          continue;
+        }
+        const goldenMatch = trimmed.match(/^isGoldenOpening\s*:\s*(true|false)\s*$/);
+        if (goldenMatch) {
+          isGoldenOpening = goldenMatch[1] === "true";
+          continue;
+        }
+      }
+
+      // We must have at least chapter and goal to produce valid YAML
+      if (chapter === undefined || goal === undefined) {
+        return undefined;
+      }
+
+      // Re-emit clean YAML
+      const parts: string[] = [
+        `chapter: ${chapter}`,
+        `goal: ${JSON.stringify(goal)}`,
+      ];
+      if (isGoldenOpening !== undefined) {
+        parts.push(`isGoldenOpening: ${isGoldenOpening}`);
+      }
+      if (threadRefIds.length > 0) {
+        parts.push(`threadRefs:\n${threadRefIds.map((id) => `  - ${id}`).join("\n")}`);
+      } else {
+        parts.push("threadRefs: []");
+      }
+
+      const fixedYaml = parts.join("\n");
+
+      // Validate the repaired YAML parses correctly
+      const parsed = YAML.load(fixedYaml);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return fixedYaml;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private findPlannerMemoBodyStart(raw: string): number {
+    const headings = [
+      "## 当前任务",
+      "## Current task",
+    ];
+    const positions = headings
+      .map((heading) => raw.indexOf(heading))
+      .filter((position) => position >= 0);
+    return positions.length > 0 ? Math.min(...positions) : -1;
+  }
+
+  private truncateMemoGoal(goal: string): string {
+    const normalized = goal.replace(/\s+/g, " ").trim();
+    const fallback = normalized.length > 0 ? normalized : "Advance this chapter with clear narrative focus.";
+    return fallback.length <= 80 ? fallback : fallback.slice(0, 80);
   }
 
   private isGoldenOpeningChapter(language: string | undefined, chapterNumber: number): boolean {

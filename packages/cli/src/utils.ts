@@ -133,6 +133,7 @@ export function buildPipelineConfig(
 
   const hasLogging = sinks.length > 0;
   const logger = hasLogging ? createLogger({ tag: "inkos", sinks }) : undefined;
+  logger?.info("启动", { service: config.llm.service, model: config.llm.model });
 
   const onStreamProgress = hasLogging
     ? (progress: { readonly elapsedMs: number; readonly totalChars: number; readonly chineseChars: number; readonly thinkingChars: number; readonly status: string; readonly label?: string; readonly recentText?: string; readonly currentSection?: string }) => {
@@ -145,8 +146,8 @@ export function buildPipelineConfig(
           logger?.info(
             `[${timeStr}] ${labelInfo}streaming ${Math.round(progress.elapsedMs / 1000)}s, ${progress.totalChars} chars (${progress.chineseChars} CJK)${thinkingInfo}${sectionInfo}`,
           );
-          // Debug: show what's currently being generated
-          if (progress.recentText) {
+          // Debug: show what's currently being generated (controlled by INKOS_LOG_LLM_OUTPUT env var)
+          if (progress.recentText && (process.env.INKOS_LOG_LLM_OUTPUT === "1" || process.env.INKOS_LOG_LLM_OUTPUT === "true")) {
             const preview = progress.recentText.length > 200 ? `…${progress.recentText.slice(-200)}` : progress.recentText;
             logger?.debug(`[${timeStr}] ${labelInfo}recent output: ${JSON.stringify(preview)}`);
           }

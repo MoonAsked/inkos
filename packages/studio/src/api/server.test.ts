@@ -47,7 +47,6 @@ const SERVICE_PRESETS_MOCK: Record<string, ServicePresetMock> = {
   minimax: { providerFamily: "anthropic", baseUrl: "https://api.minimaxi.com/anthropic", modelsBaseUrl: "https://api.minimaxi.com/anthropic", knownModels: [] as string[] },
   bailian: { providerFamily: "anthropic", baseUrl: "https://dashscope.aliyuncs.com/apps/anthropic", modelsBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", knownModels: [] as string[] },
   google: { providerFamily: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", modelsBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", knownModels: [] as string[] },
-  ollama: { providerFamily: "openai", baseUrl: "http://localhost:11434/v1", modelsBaseUrl: "http://localhost:11434/v1", knownModels: [] as string[] },
   custom: { providerFamily: "openai", baseUrl: "", knownModels: [] as string[] },
 };
 const resolveServicePresetMock = vi.fn((service: string) => SERVICE_PRESETS_MOCK[service]);
@@ -63,10 +62,9 @@ const listModelsForServiceMock = vi.fn(async (service: string, apiKey?: string, 
     return preset.knownModels.map((id) => ({ id, name: id, reasoning: false, contextWindow: 0 }));
   }
   const modelsBaseUrl = liveBaseUrl ?? resolveServiceModelsBaseUrlMock(service);
-  const allowsNoKey = Boolean(modelsBaseUrl?.startsWith("http://localhost") || modelsBaseUrl?.startsWith("http://127.0.0.1"));
-  if ((!apiKey && !allowsNoKey) || !modelsBaseUrl) return [];
+  if (!apiKey || !modelsBaseUrl) return [];
   const res = await fetch(`${modelsBaseUrl.replace(/\/$/, "")}/models`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    headers: { Authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) return [];
@@ -79,13 +77,13 @@ const listModelsForServiceMock = vi.fn(async (service: string, apiKey?: string, 
   }));
 });
 const endpointIdsByGroup = {
-  overseas: ["anthropic", "google", "mistral", "openai", "xai"],
+  overseas: ["anthropic", "google", "mistral", "nvidia", "openai", "xai"],
   china: [
     "ai360", "baichuan", "bailian", "deepseek", "hunyuan", "internlm", "longcat",
     "minimax", "moonshot", "sensenova", "sensenova_2", "spark", "stepfun", "tencentcloud",
     "volcengine", "wenxin", "xiaomimimo", "zeroone", "zhipu",
   ],
-  aggregator: ["giteeai", "infiniai", "modelscope", "newapi", "openrouter", "ppio", "qiniu", "siliconcloud"],
+  aggregator: ["giteeai", "infiniai", "modelscope", "newapi", "opencode", "openrouter", "ppio", "qiniu", "siliconcloud"],
   local: ["githubCopilot", "ollama"],
   codingPlan: [
     "astronCodingPlan", "bailianCodingPlan", "glmCodingPlan", "kimiCodingPlan", "kimicode",
@@ -99,7 +97,8 @@ const endpointMocks = [
     group,
     ...(id === "google" ? { checkModel: "gemini-2.5-flash" } : {}),
     ...(id === "minimax" ? { checkModel: "MiniMax-M2.7" } : {}),
-    ...(id === "ollama" ? { checkModel: "llama3.2:3b" } : {}),
+...(id === "ollama" ? { checkModel: "llama3.2:3b" } : {}),
+    ...(id === "volcengine" ? { checkModel: "doubao-lite-32k" } : {}),
     models: [
       { id: `${id}-model`, maxOutput: 4096, contextWindowTokens: 32768, enabled: true },
       { id: `${id}-disabled`, maxOutput: 4096, contextWindowTokens: 32768, enabled: false },
@@ -204,6 +203,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     createLogger: vi.fn(() => logger),
     computeAnalytics: vi.fn(() => ({})),
     isSafeBookId: actual.isSafeBookId,
+    normalizePlatformOrOther: actual.normalizePlatformOrOther,
     chatCompletion: chatCompletionMock,
     loadProjectConfig: loadProjectConfigMock,
     processProjectInteractionInput: processProjectInteractionInputMock,
@@ -227,7 +227,6 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     resolveServiceProviderFamily: resolveServiceProviderFamilyMock,
     resolveServiceModelsBaseUrl: resolveServiceModelsBaseUrlMock,
     resolveServiceModel: resolveServiceModelMock,
-    isApiKeyOptionalForEndpoint: actual.isApiKeyOptionalForEndpoint,
     loadSecrets: loadSecretsMock,
     saveSecrets: saveSecretsMock,
     getServiceApiKey: getServiceApiKeyMock,
@@ -725,11 +724,11 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { services: Array<{ service: string; group?: string; connected: boolean }> };
     const bank = body.services.filter((s) => !s.service.startsWith("custom"));
-    expect(bank.length).toBe(42);
+    expect(bank.length).toBe(44);
     expect(bank.every((s) => typeof s.group === "string")).toBe(true);
-    expect(bank.filter((s) => s.group === "overseas")).toHaveLength(5);
+    expect(bank.filter((s) => s.group === "overseas")).toHaveLength(6);
     expect(bank.filter((s) => s.group === "china")).toHaveLength(19);
-    expect(bank.filter((s) => s.group === "aggregator")).toHaveLength(8);
+    expect(bank.filter((s) => s.group === "aggregator")).toHaveLength(9);
     expect(bank.filter((s) => s.group === "local")).toHaveLength(2);
     expect(bank.filter((s) => s.group === "codingPlan")).toHaveLength(8);
     expect(body.services.find((s) => s.service === "moonshot")?.connected).toBe(true);
@@ -839,29 +838,6 @@ describe("createStudioServer daemon lifecycle", () => {
         { id: "gemini-2.5-flash", name: "gemini-2.5-flash", contextWindow: 1114112 },
       ],
     });
-  });
-
-  it("returns Ollama live models without a saved API key", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ id: "qwen3.6:35b-a3b" }] }),
-    });
-    vi.stubGlobal("fetch", fetchMock as typeof fetch);
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/v1/services/ollama/models?refresh=1");
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      models: [
-        { id: "qwen3.6:35b-a3b", name: "qwen3.6:35b-a3b" },
-      ],
-    });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:11434/v1/models",
-      expect.objectContaining({ headers: {} }),
-    );
   });
 
   it("merges service config patches instead of overwriting existing services", async () => {
@@ -1304,6 +1280,48 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(chatCompletionMock.mock.calls.map((call) => call[1])).not.toContain("MiniMax-M2.7");
   });
 
+it("uses discovered Volcengine models before the stale built-in check model", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ id: "doubao-seed-2.0-lite" }] }),
+    });
+    vi.stubGlobal("fetch", fetchMock as typeof fetch);
+    createLLMClientMock.mockImplementation(((cfg: unknown) => cfg) as any);
+    chatCompletionMock.mockImplementation(async (_client: any, model: string) => {
+      if (model === "doubao-seed-2.0-lite") {
+        return {
+          content: "pong",
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        };
+      }
+      throw new Error(`unexpected model: ${model}`);
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/services/volcengine/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apiKey: "volc-key",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+        apiFormat: "responses",
+        stream: true,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      selectedModel: "doubao-seed-2.0-lite",
+      detected: {
+        modelsSource: "api",
+      },
+    });
+    expect(chatCompletionMock.mock.calls.map((call) => call[1])).not.toContain("doubao-lite-32k");
+  });
+
   it("uses discovered Ollama models without requiring an API key or the built-in check model", async () => {
     await writeFile(join(root, "inkos.json"), JSON.stringify({
       ...projectConfig,
@@ -1352,7 +1370,6 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     expect(chatCompletionMock.mock.calls.map((call) => call[1])).not.toContain("llama3.2:3b");
   });
-
   it("does not fall back to the global default model when a bank endpoint probe fails", async () => {
     await writeFile(join(root, "inkos.json"), JSON.stringify({
       ...projectConfig,
@@ -1641,6 +1658,35 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("surfaces LLM config errors during create instead of masking them as internal errors", async () => {
+    loadProjectConfigMock.mockRejectedValueOnce(
+      new Error("Studio LLM API key not set. Open Studio services and save an API key for the selected service."),
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Needs Key",
+        genre: "urban",
+        platform: "qidian",
+        language: "zh",
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "LLM_CONFIG_ERROR",
+        message: "Studio LLM API key not set. Open Studio services and save an API key for the selected service.",
+      },
+    });
+    expect(processProjectInteractionRequestMock).not.toHaveBeenCalled();
+  });
+
   it("uses rollback semantics for chapter rejection instead of only flipping status", async () => {
     loadChapterIndexMock.mockResolvedValue([
       {
@@ -1699,6 +1745,7 @@ describe("createStudioServer daemon lifecycle", () => {
         language: "zh",
         chapterWordCount: 2600,
         targetChapters: 88,
+        blurb: "主角在旧城查账洗白，卷一先追账本。",
       }),
     });
 
@@ -1714,51 +1761,9 @@ describe("createStudioServer daemon lifecycle", () => {
         platform: "qidian",
         chapterWordCount: 2600,
         targetChapters: 88,
+        blurb: "主角在旧城查账洗白，卷一先追账本。",
       },
     }));
-  });
-
-  it("creates books with Studio Ollama config without requiring an API key", async () => {
-    await writeFile(join(root, "inkos.json"), JSON.stringify({
-      ...projectConfig,
-      llm: {
-        configSource: "studio",
-        service: "ollama",
-        provider: "openai",
-        baseUrl: "http://localhost:11434/v1",
-        model: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-        apiKey: "",
-        services: [{ service: "ollama", apiFormat: "chat", stream: false }],
-        defaultModel: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-        apiFormat: "chat",
-        stream: false,
-      },
-    }, null, 2), "utf-8");
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/v1/books/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: "Local Book",
-        genre: "urban",
-        platform: "qidian",
-        language: "zh",
-      }),
-    });
-
-    expect(response.status).toBe(200);
-    expect(loadProjectConfigMock).toHaveBeenCalledWith(root, { consumer: "studio" });
-    expect(createLLMClientMock).toHaveBeenCalledWith(expect.objectContaining({
-      service: "ollama",
-      model: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-      apiKey: "",
-    }));
-    expect(pipelineConfigs.at(-1)).toMatchObject({
-      model: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-    });
   });
 
   it("passes one-off brief into revise requests through pipeline config", async () => {
@@ -2214,97 +2219,6 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(response.json()).resolves.toMatchObject({
       response: "你好，我在。",
     });
-  });
-
-  it("lets the Studio agent creation path use explicit Ollama models without an API key", async () => {
-    const ollamaModel = {
-      id: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-      name: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-      api: "openai-completions",
-      provider: "ollama",
-      baseUrl: "http://localhost:11434/v1",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 0,
-      maxTokens: 16384,
-    };
-    await writeFile(join(root, "inkos.json"), JSON.stringify({
-      ...projectConfig,
-      llm: {
-        configSource: "studio",
-        service: "ollama",
-        provider: "openai",
-        baseUrl: "http://localhost:11434/v1",
-        model: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-        apiKey: "",
-        services: [
-          { service: "ollama", apiFormat: "chat", stream: false },
-        ],
-        defaultModel: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-        apiFormat: "chat",
-        stream: false,
-      },
-    }, null, 2), "utf-8");
-    loadBookSessionMock.mockResolvedValueOnce({
-      sessionId: "agent-session-1",
-      bookId: null,
-      title: null,
-      messages: [],
-      events: [],
-      draftRounds: [],
-      createdAt: 1,
-      updatedAt: 1,
-    });
-    createLLMClientMock.mockImplementation(((cfg: any) => ({
-      _piModel: {
-        ...ollamaModel,
-        id: cfg.model,
-        name: cfg.model,
-        provider: cfg.service === "ollama" ? "ollama" : "openai",
-        baseUrl: cfg.baseUrl || "http://localhost:11434/v1",
-      },
-      _apiKey: cfg.apiKey ?? "",
-    })) as any);
-    resolveServiceModelMock.mockResolvedValue({
-      model: ollamaModel,
-      apiKey: "",
-    });
-    runAgentSessionMock.mockResolvedValueOnce({
-      responseText: "收到。",
-      messages: [
-        { role: "user", content: "/create" },
-        { role: "assistant", content: "收到。" },
-      ],
-    });
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/v1/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction: "/create",
-        service: "ollama",
-        model: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-        sessionId: "agent-session-1",
-      }),
-    });
-
-    expect(response.status).toBe(200);
-    expect(createLLMClientMock).toHaveBeenCalledWith(expect.objectContaining({
-      service: "ollama",
-      model: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-      apiKey: "",
-    }));
-    expect(pipelineConfigs.at(-1)).toMatchObject({
-      client: expect.objectContaining({ _apiKey: "" }),
-      model: "Qwen3.6-35B-A3B-APEX-I-Mini.gguf",
-    });
-    const agentConfig = runAgentSessionMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(agentConfig.model).toBe(ollamaModel);
-    expect(agentConfig.apiKey).toBe("");
   });
 
   it("rejects explicit non-text models before running the agent", async () => {

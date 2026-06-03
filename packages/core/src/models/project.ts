@@ -6,9 +6,9 @@ const LLMServiceEntrySchema = z.object({
   name: z.string().min(1).optional(),
   baseUrl: z.string().url().optional(),
   temperature: z.number().min(0).max(2).optional(),
+  contextWindow: z.number().int().min(1).optional(),
   apiFormat: z.enum(["chat", "responses"]).optional(),
   stream: z.boolean().optional(),
-  contextWindow: z.number().int().min(1).optional(),
 });
 
 // C1 (v2.0.0 breaking): 删除 maxTokens / maxTokensCap 字段。
@@ -23,8 +23,8 @@ export const LLMConfigSchema = z.object({
   model: z.string().min(1),
   proxyUrl: z.string().url().optional(),
   temperature: z.number().min(0).max(2).default(0.7),
-  thinkingBudget: z.number().int().min(0).default(0),
   contextWindow: z.number().int().min(1).optional(),
+  thinkingBudget: z.number().int().min(0).default(0),
   extra: z.record(z.unknown()).optional(),
   headers: z.record(z.string()).optional(),
   apiFormat: z.enum(["chat", "responses"]).default("chat"),

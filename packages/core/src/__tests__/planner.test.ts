@@ -214,6 +214,83 @@ describe("PlannerAgent.planChapter memo generation", () => {
     expect(userMsg?.content).toContain("上次输出的错误");
   });
 
+  it("recovers provider-extracted thinking memo when chapter is synthesized as zero", async () => {
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `---\nchapter: 0\ngoal: "(auto-extracted)"\n---\n${VALID_BODY}\n`,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 574,
+      externalContext: "第574章必须继续推进帝王宫门口冲突。",
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(574);
+    expect(result.memo.goal).toBe("第574章必须继续推进帝王宫门口冲突。");
+    expect(result.memo.body).toContain("## 本章 hook 账");
+  });
+
+  it("recovers a memo that only omitted the optional do-not section", async () => {
+    const bodyWithoutDoNot = VALID_BODY.replace(/\n\n## 不要做\n[\s\S]*$/, "");
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `---\nchapter: 575\ngoal: 推进许泓泊现身后的局势变化\nthreadRefs: []\n---\n${bodyWithoutDoNot}\n`,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 575,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(575);
+    expect(result.memo.body).toContain("## 不要做\n无");
+  });
+
+  it("recovers a memo that omitted both hook ledger and do-not sections", async () => {
+    // Simulate thinking model truncation: both trailing sections missing
+    const bodyWithoutTrailing = VALID_BODY.replace(/\n\n## 本章 hook 账\n[\s\S]*$/, "");
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `---\nchapter: 576\ngoal: 高买瓢把子后局势急转\nthreadRefs: []\n---\n${bodyWithoutTrailing}\n`,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 576,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(576);
+    expect(result.memo.body).toContain("## 本章 hook 账");
+    expect(result.memo.body).toContain("## 不要做\n无");
+  });
+
+  it("recovers a memo that omitted only the hook ledger section", async () => {
+    // Simulate thinking model truncation: hook ledger missing but do-not present
+    const bodyWithoutHookLedger = VALID_BODY.replace(/\n\n## 本章 hook 账\n[\s\S]*?## 不要做/, "## 不要做");
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `---\nchapter: 577\ngoal: 推进暗线收束\nthreadRefs: []\n---\n${bodyWithoutHookLedger}\n`,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 577,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(577);
+    expect(result.memo.body).toContain("## 本章 hook 账");
+    expect(result.memo.body).toContain("## 不要做");
+  });
+
   // Phase hotfix 4: English books must receive English system + user prompts
   // and English golden-opening guidance for chapters ≤ 3.
   it("uses English prompts end-to-end when book.language is en", async () => {
@@ -310,6 +387,31 @@ defer:
         chapterNumber: 2,
       }),
     ).rejects.toBeInstanceOf(PlannerParseError);
+  });
+
+  it("recovers from inconsistent threadRefs indentation in YAML frontmatter", async () => {
+    // Simulate LLM outputting threadRefs with mixed indentation:
+    //   threadRefs:
+    //     - H596-1    ← indent 2 (correct)
+    //     - H596-2    ← indent 2 (correct)
+    //    - H603-1     ← indent 1 (incorrect — causes js-yaml "bad indentation")
+    //    - H603-2     ← indent 1 (incorrect)
+    const badYamlMemo = `---\nchapter: 606\ngoal: 尴尬的政法委书记面对两方施压\nisGoldenOpening: false\nthreadRefs:\n  - H596-1\n  - H596-2\n - H603-1\n - H603-2\n---\n${VALID_BODY}\n`;
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: badYamlMemo,
+      usage: ZERO_USAGE,
+    } as unknown as Awaited<ReturnType<typeof llmProvider.chatCompletion>>);
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 606,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(606);
+    expect(result.memo.threadRefs).toEqual(["H596-1", "H596-2", "H603-1", "H603-2"]);
+    expect(result.memo.body).toContain("## 当前任务");
   });
 
   // Phase hotfix 5: planner.intent.mustAvoid must come from the Phase 5

@@ -54,7 +54,7 @@ threadRefs:
 
 ## 日常/过渡承担什么任务
 <如果本章是非高压章节，每段非冲突段落说明功能。格式：[段落位置] → [承担功能]
-如果本章是高压/冲突章节，写"不适用 - 本章无日常过渡">
+如果本章是高压/冲突章节，写"不适用——本章为高压冲突章节，无日常过渡段落">
 
 ## 关键抉择过三连问
 - 主角本章最关键的一次选择：
@@ -96,7 +96,7 @@ defer:
 
 ## 输出要求
 
-- goal 字段不超过 50 字
+- goal 字段不超过 80 字
 - threadRefs 是 YAML 数组，内容是从输入的 pending_hooks/subplot_board 中挑出的 id
 - 每个二级标题（##）必须出现，内容不能为空
 - 不要在 memo 里提方法论术语（"情绪缺口"、"cyclePhase"、"蓄压"等）——直接用这本书的人物、地点、事件说事
@@ -200,7 +200,7 @@ defer:
 
 ## Output requirements
 
-- goal field is no more than 50 characters
+- goal field is no more than 80 characters
 - threadRefs is a YAML array of ids picked from the input pending_hooks / subplot_board
 - Every level-2 heading (##) must appear; none may be empty
 - Do NOT use methodology jargon ("emotional gap", "cyclePhase", "pressure buildup") in the memo — speak directly using this book's people, places, events

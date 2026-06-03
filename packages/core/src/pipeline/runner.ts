@@ -18,6 +18,7 @@ import { StateValidatorAgent, type ValidationResult, type ValidationWarning } fr
 import { RadarAgent } from "../agents/radar.js";
 import type { RadarSource } from "../agents/radar-source.js";
 import { readGenreProfile } from "../agents/rules-reader.js";
+import { sanitizeRoleFileName, canonicalRoleName } from "../utils/outline-paths.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
 import { StateManager } from "../state/manager.js";
@@ -39,8 +40,6 @@ import {
   readRoleCards,
   readStoryFrame,
   readVolumeMap,
-  sanitizeRoleFileName,
-  canonicalRoleName,
 } from "../utils/outline-paths.js";
 import { loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
@@ -437,9 +436,15 @@ export class PipelineRunner {
     readonly language: "zh" | "en";
     readonly stageLanguage: LengthLanguage;
     readonly maxRetries?: number;
+    readonly skipReview?: boolean;
   }): Promise<ArchitectOutput> {
     const maxRetries = params.maxRetries ?? this.config.foundationReviewRetries ?? 2;
-    this.logDebug(`[pipeline] generateAndReviewFoundation: mode=${params.mode}, language=${params.language}, maxRetries=${maxRetries}`);
+    this.logDebug(`[pipeline] generateAndReviewFoundation: mode=${params.mode}, language=${params.language}, maxRetries=${maxRetries}, skipReview=${params.skipReview}`);
+
+    if (params.skipReview) {
+      return await params.generate();
+    }
+
     let foundation = await params.generate();
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -579,7 +584,7 @@ export class PipelineRunner {
         thinkingBudget: base?.thinkingBudget ?? 0,
         apiFormat,
         stream,
-      });
+      }, this.config.logger?.child("llm"));
       this.agentClients.set(cacheKey, client);
     }
     return { model: override.model, client };
@@ -1535,6 +1540,7 @@ export class PipelineRunner {
           ruleStack: writeInput.ruleStack,
         }
       : undefined;
+    this.logDebug(`[pipeline] _writeNextChapter: chapter=${chapterNumber}, inputGovernance=${reducedControlInput ? "v2" : "legacy"}, wordCount=${wordCount ?? book.chapterWordCount}`);
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
     const lengthSpec = buildLengthSpec(
@@ -1562,6 +1568,7 @@ export class PipelineRunner {
       ...(temperatureOverride ? { temperatureOverride } : {}),
     });
     const writerCount = countChapterLength(output.content, lengthSpec.countingMode);
+    this.logDebug(`[pipeline] writer output: ${writerCount} ${lengthSpec.countingMode}, content=${output.content.length} chars`);
 
     // Token usage accumulator
     let totalUsage: TokenUsageSummary = output.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -1616,6 +1623,7 @@ export class PipelineRunner {
     let auditResult = reviewResult.auditResult;
     const postReviseCount = reviewResult.postReviseCount;
     const normalizeApplied = reviewResult.normalizeApplied;
+    this.logDebug(`[pipeline] review cycle: revised=${revised}, auditPassed=${auditResult.passed}, finalWordCount=${finalWordCount}, postReviseCount=${postReviseCount}, normalizeApplied=${normalizeApplied}`);
 
     // 3b. File-layer polish pass — runs AFTER structural audit accepts the
     // chapter. Polisher only touches sentence craft / paragraph shape /
@@ -1624,6 +1632,7 @@ export class PipelineRunner {
     // chapter (leave the failing draft visible for the next cycle) or when
     // length is dangerously off-range (normalize should handle it, not polish).
     if (auditResult.passed) {
+      this.logDebug(`[pipeline] audit passed, proceeding to polish pass`);
       try {
         const { PolisherAgent } = await import("../agents/polisher.js");
         const polisher = new PolisherAgent(this.agentCtxFor("polisher", bookId));
@@ -2563,7 +2572,9 @@ ${matrix}`,
           const tailCount = Math.min(5, chapterChunks.length - headCount);
           const headChapters = chapterChunks.slice(0, headCount);
           const tailChapters = chapterChunks.slice(chapterChunks.length - tailCount);
-          let budget = usableTokens - 16384 - 4096; // reserve for system prompt + output
+          const modelMaxOutput = this.agentCtxFor("architect", input.bookId).client._piModel?.maxTokens ?? 131072;
+          const effectiveMaxOutput = Math.min(131072, modelMaxOutput); // clamp like provider does
+          let budget = usableTokens - 8192 - effectiveMaxOutput - 4096; // reserve for system prompt (~8192 tokens) + output + safety margin
           let selected: typeof chapterChunks = [];
           for (const ch of headChapters) {
             if (budget > ch.tokens) { selected.push(ch); budget -= ch.tokens; }
@@ -2598,8 +2609,29 @@ ${matrix}`,
         const isSeries = input.importMode === "series";
         /** In import mode, the foundation is reverse-engineered from existing
          *  chapters — it's descriptive, not creative. Skip the quality review
-         *  loop to avoid wasteful retries on content that already exists. */
-        const foundation = await architect.generateFoundationFromImport(book, foundationSource, undefined, undefined, { importMode: isSeries ? "series" : undefined });
+         *  loop (foundation reviewer) to avoid wasteful retries on content
+         *  that already exists in the source text. */
+        let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
+        try {
+          foundation = await architect.generateFoundationFromImport(book, sampledText, undefined, undefined, { importMode: isSeries ? "series" : undefined });
+        } catch (step1Error) {
+          // If Step 1 foundation generation is blocked by content_filter,
+          // retry with only chapter titles (no prose) so the architect can
+          // still produce a skeleton foundation from structural metadata.
+          if (!this.isProviderContentFilterError(step1Error)) {
+            throw step1Error;
+          }
+          log?.warn(this.localize(resolvedLanguage, {
+            zh: "步骤 1 基础设定生成被 content_filter 拦截；改用章节标题摘要重试。",
+            en: "Step 1 foundation generation blocked by content_filter; retrying with chapter title summary only.",
+          }));
+          const titleOnlyText = input.chapters.map((c, i) =>
+            resolvedLanguage === "en"
+              ? `Chapter ${i + 1}: ${c.title}`
+              : `第${i + 1}章 ${c.title}`,
+          ).join("\n");
+          foundation = await architect.generateFoundationFromImport(book, titleOnlyText, undefined, undefined, { importMode: isSeries ? "series" : undefined });
+        }
         await architect.writeFoundationFiles(
           bookDir,
           foundation,
@@ -2675,6 +2707,14 @@ ${matrix}`,
             const isEmptyResponse = errMsg.includes("empty response");
             const isTerminated = errMsg.includes("terminated");
             const isRateLimited = errMsg.includes("429") || errMsg.includes("rate limit");
+            const isBadRequest = errMsg.includes("400") || errMsg.includes("请求参数错误");
+            if (isBadRequest) {
+              log?.error(this.localize(resolvedLanguage, {
+                zh: `章节 ${chapterNumber} 分析API参数错误(400)，这是不可重试配置错误，已停止重试。`,
+                en: `Chapter ${chapterNumber} analysis hit bad request (400), a non-retryable configuration error; stopping retries.`,
+              }));
+              throw analyzeError;
+            }
             if ((isEmptyResponse || isTerminated || isRateLimited) && analyzeAttempt < maxAnalyzeRetries) {
               const reason = isRateLimited ? "请求过多(429)" : isTerminated ? "连接被终止" : "返回空响应";
               const reasonEn = isRateLimited ? "rate limited (429)" : isTerminated ? "connection terminated" : "returned empty response";
@@ -2748,7 +2788,7 @@ ${matrix}`,
         const fi = input.foundationInterval ?? 0;
         if (fi > 0 && (chapterNumber % fi === 0 || i === input.chapters.length - 1)) {
           await this.mergeChapterIntoFoundation(
-            input.bookId, book, bookDir, ch, chapterNumber,
+            input.bookId, book, bookDir, ch, output, chapterNumber,
             gp.numericalSystem, resolvedLanguage,
             input.importMode === "series" ? "series" : undefined,
           );
@@ -2971,12 +3011,12 @@ ${matrix}`,
     book: BookConfig,
     bookDir: string,
     chapter: { readonly title: string; readonly content: string },
+    analysis: WriteChapterOutput,
     chapterNumber: number,
     _numericalSystem: boolean,
     language: LengthLanguage,
     importMode?: "continuation" | "series",
   ): Promise<void> {
-    this.logDebug(`[pipeline] mergeChapterIntoFoundation: bookId=${bookId}, chapter=${chapterNumber}`);
     const chapterText = language === "en"
       ? `Chapter ${chapterNumber}: ${chapter.title}\n\n${chapter.content}`
       : `第${chapterNumber}章 ${chapter.title}\n\n${chapter.content}`;
@@ -3030,12 +3070,96 @@ ${matrix}`,
       : "";
 
     const architect = new ArchitectAgent(this.agentCtxFor("architect", bookId));
-    const foundation = await architect.generateFoundationFromImport(
-      book, chapterText,
-      existingFoundationText, // externalContext: full foundation for merge
+    let foundation: Awaited<ReturnType<ArchitectAgent["generateFoundationFromImport"]>>;
+    const generateFoundationMergeRaw = (sourceText: string, externalCtx?: string) => architect.generateFoundationFromImport(
+      book,
+      sourceText,
+      externalCtx ?? existingFoundationText,
       undefined,
-      { importMode },
+      { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
     );
+    // Variant that omits externalContext entirely — used as a last-resort retry
+    // when the existing foundation files themselves trigger content_filter.
+    const generateFoundationMergeRawNoContext = (sourceText: string) => architect.generateFoundationFromImport(
+      book,
+      sourceText,
+      undefined,  // no external context
+      undefined,
+      { importMode, requiredSections: ["story_frame", "volume_map", "roles"] },
+    );
+    // Wrap with empty-response retry for thinking/reasoning models that put all
+    // output in thinking_delta but extractAnswerFromReasoning fails to recover.
+    const maxFoundationMergeRetries = 3;
+    const generateFoundationMerge = async (sourceText: string) => {
+      for (let attempt = 0; attempt < maxFoundationMergeRetries; attempt++) {
+        try {
+          return await generateFoundationMergeRaw(sourceText);
+        } catch (error: any) {
+          const errMsg = error?.message ?? "";
+          if (errMsg.includes("empty response") && attempt < maxFoundationMergeRetries - 1) {
+            log?.warn(this.localize(language, {
+              zh: `章节 ${chapterNumber} 基础设定合并返回空响应（第${attempt + 1}次），重试中...`,
+              en: `Chapter ${chapterNumber} foundation merge returned empty response (attempt ${attempt + 1}), retrying...`,
+            }));
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw new Error("Unexpected: generateFoundationMerge retry loop exited without result");
+    };
+    try {
+      foundation = await generateFoundationMerge(chapterText);
+    } catch (error) {
+      if (!this.isProviderContentFilterError(error) && !this.isArchitectMissingRequiredSectionsError(error)) {
+        throw error;
+      }
+      const blockedByFilter = this.isProviderContentFilterError(error);
+      log?.warn(blockedByFilter
+        ? this.localize(language, {
+            zh: `章节 ${chapterNumber} 原文合并被上游 content_filter 拦截；改用章节分析事实包重试基础设定合并。`,
+            en: `Chapter ${chapterNumber} raw-text foundation merge was blocked by provider content_filter; retrying with the chapter analysis fact package.`,
+          })
+        : this.localize(language, {
+            zh: `章节 ${chapterNumber} 基础设定合并输出缺段；改用章节分析事实包重试。`,
+            en: `Chapter ${chapterNumber} foundation merge output missed required sections; retrying with the chapter analysis fact package.`,
+          }));
+      const safeChapterText = this.buildFoundationMergeFactPackage(chapterNumber, chapter.title, analysis, language);
+      try {
+        foundation = await generateFoundationMerge(safeChapterText);
+      } catch (retryError) {
+        const retryIsContentFilter = this.isProviderContentFilterError(retryError);
+        const retryIsMissingSections = this.isArchitectMissingRequiredSectionsError(retryError);
+        if (retryIsContentFilter) {
+          // Fact-package retry still hit content_filter — the externalContext
+          // (existing foundation files) may contain flagged content.  Try once
+          // more WITHOUT externalContext so only the safe fact package is sent.
+          log?.warn(this.localize(language, {
+            zh: `章节 ${chapterNumber} 事实包重试仍被 content_filter 拦截；尝试去掉外部上下文后重试。`,
+            en: `Chapter ${chapterNumber} fact-package retry still hit content_filter; retrying without external context.`,
+          }));
+          try {
+            foundation = await generateFoundationMergeRawNoContext(safeChapterText);
+          } catch (noContextError) {
+            // All retries exhausted — skip foundation write-back for this chapter
+            // rather than crashing the entire import.
+            log?.warn(this.localize(language, {
+              zh: `章节 ${chapterNumber} 基础设定合并所有重试均被 content_filter 拦截；跳过本章基础设定写回，保留现有基础设定。`,
+              en: `Chapter ${chapterNumber} foundation merge exhausted all content_filter retries; skipping foundation write-back and keeping the existing foundation.`,
+            }));
+            return;
+          }
+        } else if (!retryIsMissingSections) {
+          throw retryError;
+        } else {
+          log?.warn(this.localize(language, {
+            zh: `章节 ${chapterNumber} 基础设定合并重试仍缺段；跳过本章基础设定写回，保留现有基础设定。`,
+            en: `Chapter ${chapterNumber} foundation merge retry still missed required sections; skipping foundation write-back and keeping the existing foundation.`,
+          }));
+          return;
+        }
+      }
+    }
 
     // Write merged foundation files. Skip runtime files (pending_hooks,
     // current_state) — they are maintained by the step 2 analysis.
@@ -3153,6 +3277,77 @@ ${matrix}`,
       zh: `基础设定已合并（story_frame=${frameLen}ch, volume_map=${vmapLen}ch, roles=${roleCount}个）`,
       en: `Foundation merged (story_frame=${frameLen}ch, volume_map=${vmapLen}ch, roles=${roleCount})`,
     }));
+  }
+
+  private isProviderContentFilterError(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error);
+    return /content_filter|content filter|内容审查|内容过滤/i.test(text);
+  }
+
+  private isArchitectMissingRequiredSectionsError(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error);
+    return /Architect output missing required section/i.test(text);
+  }
+
+  private buildFoundationMergeFactPackage(
+    chapterNumber: number,
+    chapterTitle: string,
+    analysis: WriteChapterOutput,
+    language: LengthLanguage,
+  ): string {
+    if (language === "en") {
+      return [
+        `CHAPTER_ANALYSIS_SAFE_PACKAGE`,
+        `Chapter: ${chapterNumber}`,
+        `Title: ${analysis.title || chapterTitle}`,
+        "",
+        "Use this analyzed fact package to merge the foundation. The original prose is omitted because the provider blocked raw-text processing. Do not treat omitted prose as absent canon; rely on the extracted state, summaries, hooks, subplots, emotional arcs, and character matrix below.",
+        "",
+        "## Chapter Summary",
+        analysis.chapterSummary || "(not provided)",
+        "",
+        "## Updated State",
+        analysis.updatedState || "(not provided)",
+        "",
+        "## Updated Hooks",
+        analysis.updatedHooks || "(not provided)",
+        "",
+        "## Updated Subplots",
+        analysis.updatedSubplots || "(not provided)",
+        "",
+        "## Updated Emotional Arcs",
+        analysis.updatedEmotionalArcs || "(not provided)",
+        "",
+        "## Updated Character Matrix",
+        analysis.updatedCharacterMatrix || "(not provided)",
+      ].join("\n");
+    }
+
+    return [
+      "CHAPTER_ANALYSIS_SAFE_PACKAGE",
+      `章节：${chapterNumber}`,
+      `标题：${analysis.title || chapterTitle}`,
+      "",
+      "请使用这份已分析事实包合并基础设定。原始正文因上游拦截不再发送；不要把原文省略理解为正史缺失，请以下方提取出的状态、摘要、伏笔、支线、情感弧线、角色矩阵为准。",
+      "",
+      "## 本章摘要",
+      analysis.chapterSummary || "（未提供）",
+      "",
+      "## 更新后状态",
+      analysis.updatedState || "（未提供）",
+      "",
+      "## 更新后伏笔",
+      analysis.updatedHooks || "（未提供）",
+      "",
+      "## 更新后支线",
+      analysis.updatedSubplots || "（未提供）",
+      "",
+      "## 更新后情感弧线",
+      analysis.updatedEmotionalArcs || "（未提供）",
+      "",
+      "## 更新后角色矩阵",
+      analysis.updatedCharacterMatrix || "（未提供）",
+    ].join("\n");
   }
 
   private async normalizeDraftLengthIfNeeded(params: {

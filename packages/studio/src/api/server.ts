@@ -30,7 +30,6 @@ import {
   loadSecrets,
   saveSecrets,
   listModelsForService,
-  isApiKeyOptionalForEndpoint,
   getAllEndpoints,
   probeModelsFromUpstream,
   fetchWithProxy,
@@ -529,8 +528,8 @@ function buildModelCandidates(args: {
 
   push(args.preferredModel);
   push(args.configModel);
-  push(args.envModel ?? undefined);
   for (const model of args.discoveredModels) push(model.id);
+  push(args.envModel ?? undefined);
   if (args.includeGenericFallbacks === false) return candidates;
   push("gpt-5.4");
   push("gpt-4o");
@@ -662,15 +661,22 @@ async function probeServiceCapabilities(args: {
     };
   }
   const discoveredModels = modelsResponse.models;
-  // For bank services, probe with the service's own check model first — not the global default.
   const endpoint = getAllEndpoints().find((ep) => ep.id === baseService);
   const preset = resolveServicePreset(baseService);
+  const discoveredFirstModel =
+    discoveredModels.find((model) => isTextChatModelId(model.id))?.id
+    ?? discoveredModels[0]?.id;
+  // Prefer live /models results; if unavailable, probe with the service's own check model before global defaults.
   const serviceFirstModel =
-    endpoint?.checkModel
+    discoveredFirstModel
+    ?? endpoint?.checkModel
     ?? preset?.knownModels?.[0]
     ?? endpoint?.models.find((model) => model.enabled !== false)?.id;
-  const useDynamicLocalModels = baseService === "ollama";
-  const useEndpointCheckModel = !useDynamicLocalModels && !isCustomServiceId(args.service) && Boolean(endpoint?.checkModel);
+const useDynamicLocalModels = baseService === "ollama";
+  const useEndpointCheckModel = !useDynamicLocalModels
+    && !isCustomServiceId(args.service)
+    && discoveredModels.length === 0
+    && Boolean(endpoint?.checkModel);
   const configService = typeof llm.service === "string" ? llm.service : undefined;
   const configModel = !useEndpointCheckModel && configService === args.service
     ? typeof llm.defaultModel === "string"
@@ -681,7 +687,7 @@ async function probeServiceCapabilities(args: {
     : undefined;
   const useCustomFallbacks = isCustomServiceId(args.service);
   const modelCandidates = buildModelCandidates({
-    preferredModel: args.preferredModel ?? (useDynamicLocalModels ? discoveredModels[0]?.id ?? serviceFirstModel : serviceFirstModel),
+    preferredModel: args.preferredModel ?? serviceFirstModel,
     configModel,
     envModel: useCustomFallbacks ? envModel : undefined,
     discoveredModels: useEndpointCheckModel ? [] : discoveredModels,
@@ -769,6 +775,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (error instanceof ApiError) {
       return c.json({ error: { code: error.code, message: error.message } }, error.status as 400);
     }
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("LLM API key not set") || message.includes("INKOS_LLM_API_KEY not set")) {
+      return c.json({ error: { code: "LLM_CONFIG_ERROR", message } }, 400);
+    }
+    console.error("[studio] Unexpected server error", error);
     return c.json(
       { error: { code: "INTERNAL_ERROR", message: "Unexpected server error." } },
       500,
@@ -836,6 +847,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
       : sseSink;
     const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, consoleSink] });
+    logger.info("启动", { service: currentConfig.llm.service, model: currentConfig.llm.model });
     return {
       client: overrides?.client ?? createLLMClient(currentConfig.llm),
       model: overrides?.model ?? currentConfig.llm.model,
@@ -852,6 +864,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           elapsedMs: progress.elapsedMs,
           totalChars: progress.totalChars,
           chineseChars: progress.chineseChars,
+          thinkingChars: progress.thinkingChars,
           currentSection: progress.currentSection,
         });
       },
@@ -907,6 +920,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       platform?: string;
       chapterWordCount?: number;
       targetChapters?: number;
+      blurb?: string;
     }>();
 
     const now = new Date().toISOString();
@@ -937,6 +951,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         platform: body.platform,
         chapterWordCount: body.chapterWordCount,
         targetChapters: body.targetChapters,
+        blurb: body.blurb,
       },
       tools,
     }).then(
@@ -1320,18 +1335,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       stream?: boolean;
     }>();
 
+    if (!apiKey?.trim()) {
+      return c.json({ ok: false, error: "API Key 不能为空" }, 400);
+    }
+
     const resolvedBaseUrl = await resolveConfiguredServiceBaseUrl(root, service, baseUrl);
     if (!resolvedBaseUrl) {
       return c.json({ ok: false, error: `未知服务商: ${service}` }, 400);
-    }
-
-    const baseService = isCustomServiceId(service) ? "custom" : service;
-    const apiKeyOptional = isApiKeyOptionalForEndpoint({
-      provider: resolveServiceProviderFamily(baseService) ?? "openai",
-      baseUrl: resolvedBaseUrl,
-    });
-    if (!apiKey?.trim() && !apiKeyOptional) {
-      return c.json({ ok: false, error: "API Key 不能为空" }, 400);
     }
 
     const rawConfig = await loadRawConfig(root).catch(() => ({} as Record<string, unknown>));
@@ -1339,7 +1349,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const probe = await probeServiceCapabilities({
       root,
       service,
-      apiKey: apiKey?.trim() ?? "",
+      apiKey: apiKey.trim(),
       baseUrl: resolvedBaseUrl,
       preferredApiFormat: apiFormat,
       preferredStream: stream,
@@ -1457,15 +1467,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const secrets = await loadSecrets(root);
     const apiKey = c.req.query("apiKey") || secrets.services[service]?.apiKey || "";
 
-    const resolvedBaseUrl = await resolveConfiguredServiceBaseUrl(root, service);
-    const baseService = isCustomServiceId(service) ? "custom" : service;
-    const apiKeyOptional = isApiKeyOptionalForEndpoint({
-      provider: resolveServiceProviderFamily(baseService) ?? "openai",
-      baseUrl: resolvedBaseUrl,
-    });
+    // No key = no models
+    if (!apiKey) return c.json({ models: [] });
 
-    // No key = no models, except local/self-hosted endpoints such as Ollama.
-    if (!apiKey && !apiKeyOptional) return c.json({ models: [] });
+    const resolvedBaseUrl = await resolveConfiguredServiceBaseUrl(root, service);
 
     // Cache by service + resolved baseUrl + apiKey fingerprint; valid for 10 min unless ?refresh=1
     const cacheKey = `${service}::${resolvedBaseUrl ?? ""}::${apiKey.slice(-8)}`;
@@ -1891,12 +1896,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       // Create pipeline with resolved model (so sub_agent tools use the frontend-selected model)
       // Don't spread config.llm — its baseUrl/provider belong to the old service.
       // Let createLLMClient resolve baseUrl from the service preset.
-      const pipelineClient = (reqService && reqModel && resolvedModel)
+      const pipelineClient = (reqService && reqModel && resolvedApiKey)
         ? createLLMClient({
             ...config.llm,
             service: configuredEntry?.service ?? reqService,
             model: reqModel,
-            apiKey: resolvedApiKey ?? "",
+            apiKey: resolvedApiKey,
             ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
             ...(configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
             baseUrl: configuredEntry?.baseUrl ?? "",

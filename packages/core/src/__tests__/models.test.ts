@@ -4,6 +4,8 @@ import {
   PlatformSchema,
   GenreSchema,
   BookStatusSchema,
+  normalizePlatformId,
+  normalizePlatformOrOther,
 } from "../models/book.js";
 import { ChapterMetaSchema, ChapterStatusSchema } from "../models/chapter.js";
 import {
@@ -135,6 +137,18 @@ describe("PlatformSchema", () => {
 
   it("rejects unknown platform", () => {
     expect(() => PlatformSchema.parse("amazon")).toThrow();
+  });
+
+  it("normalizes platform ids and human-facing aliases", () => {
+    expect(normalizePlatformId("tomato")).toBe("tomato");
+    expect(normalizePlatformId("番茄小说")).toBe("tomato");
+    expect(normalizePlatformId("fanqie-novel")).toBe("tomato");
+    expect(normalizePlatformId("起点中文网")).toBe("qidian");
+    expect(normalizePlatformId("飞卢")).toBe("feilu");
+    expect(normalizePlatformId("royal-road")).toBe("other");
+    expect(normalizePlatformId("Kindle Unlimited")).toBe("other");
+    expect(normalizePlatformId("")).toBeUndefined();
+    expect(normalizePlatformOrOther("")).toBe("other");
   });
 });
 
@@ -560,11 +574,11 @@ describe("ChapterMemoSchema", () => {
     expect(result.threadRefs).toEqual([]);
   });
 
-  it("rejects goal longer than 50 chars", () => {
+  it("rejects goal longer than 80 chars", () => {
     expect(() =>
       ChapterMemoSchema.parse({
         chapter: 1,
-        goal: "a".repeat(51),
+        goal: "a".repeat(81),
         body: "## 当前任务\nx",
       }),
     ).toThrow();

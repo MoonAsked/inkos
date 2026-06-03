@@ -11,14 +11,17 @@ describe("InkosEndpoint.group", () => {
     const all = getAllEndpoints();
     const byGroup = (g: string) => all.filter((ep) => ep.group === g).map((e) => e.id).sort();
 
-    expect(byGroup("overseas")).toEqual(["anthropic", "google", "mistral", "openai", "xai"].sort());
+    expect(byGroup("overseas")).toEqual(["anthropic", "google", "mistral", "nvidia", "openai", "xai"].sort());
     expect(byGroup("china")).toEqual([
       "ai360", "baichuan", "bailian", "deepseek", "hunyuan", "internlm", "longcat",
       "minimax", "moonshot", "sensenova", "sensenova_2", "spark", "stepfun", "tencentcloud",
       "volcengine", "wenxin", "xiaomimimo", "zeroone", "zhipu",
     ].sort());
     expect(byGroup("aggregator")).toEqual([
-      "giteeai", "infiniai", "modelscope", "newapi", "openrouter", "ppio", "qiniu", "siliconcloud",
+      
+      "giteeai", "infiniai", "modelscope", "newapi", "opencode",
+      "openrouter", "ppio", "qiniu", "siliconcloud",
+    
     ].sort());
     expect(byGroup("local")).toEqual(["githubCopilot", "ollama"].sort());
     expect(byGroup("codingPlan")).toEqual([

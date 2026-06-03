@@ -165,20 +165,40 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       : "";
 
     // Truncate chapterContent if the total prompt would exceed the context window.
-    // CJK text: ~1.5 chars/token; use only 70% of context window for headroom.
+    // CJK text: ~1.5 chars/token; use 55% of context window for headroom (prompt
+    // token estimation is approximate and real tokenizers can be denser).
     const contextWindow = this.ctx.client._piModel?.contextWindow ?? 128_000;
-    const usableContext = Math.floor(contextWindow * 0.7);
-    const reservedForSystemAndOutput = Math.ceil(systemPrompt.length / 1.5) + 16384 + 4096;
-    const contextOverhead = currentState.length
-      + (genreProfile.numericalSystem ? ledger.length : 0)
-      + hooksBlock.length + summariesBlock.length + volumeSummariesBlock.length
-      + subplotBlock.length + emotionalBlock.length + matrixBlock.length
-      + bibleBlock.length + outlineOrControlBlock.length
-      + 200; // structural overhead (headings, labels, etc.)
-    const maxChapterChars = Math.floor((usableContext - reservedForSystemAndOutput) * 1.5) - contextOverhead;
+    const usableContext = Math.floor(contextWindow * 0.55);
+    const reservedForSystemAndOutput = Math.ceil(systemPrompt.length / 1.5) + 8192 + 2048;
+
+    // Truncate bulky context blocks (summaries, hooks, subplots) to fit
+    // the remaining budget, since they can easily exceed the context window
+    // when hundreds of chapters have been imported.
+    const maxContextBlockChars = 25000;
+    const truncateMd = (s: string, max: number) =>
+      s.length > max ? s.slice(0, Math.floor(max * 0.6)) + `\n\n--- [截断：${s.length} → ${max} 字符] ---\n\n` + s.slice(-Math.floor(max * 0.35)) : s;
+    const safeSummariesBlock = truncateMd(summariesBlock, maxContextBlockChars);
+    const safeHooksBlock = truncateMd(hooksBlock, 12000);
+    const safeSubplotBlock = truncateMd(subplotBlock, 12000);
+    const safeEmotionalBlock = truncateMd(emotionalBlock, 8000);
+    const safeMatrixBlock = truncateMd(matrixBlock, 12000);
+
+    const contextOverheadTokens = Math.ceil(
+      (currentState.length
+        + (genreProfile.numericalSystem ? ledger.length : 0)
+        + safeHooksBlock.length + safeSummariesBlock.length + volumeSummariesBlock.length
+        + safeSubplotBlock.length + safeEmotionalBlock.length + safeMatrixBlock.length
+        + bibleBlock.length + outlineOrControlBlock.length
+        + 200) / 1.5,
+    );
+    const maxChapterTokens = usableContext - reservedForSystemAndOutput - contextOverheadTokens;
+    // If budget is exhausted by context overhead, still reserve at least 2k chars
+    // for the chapter content so the prompt is never empty.
+    const safeMinChars = 2000;
+    const maxChapterChars = Math.floor(Math.max(safeMinChars, maxChapterTokens) * 1.5);
     let safeChapterContent = chapterContent;
     let chapterTruncated = false;
-    if (maxChapterChars > 0 && chapterContent.length > maxChapterChars) {
+    if (chapterContent.length > maxChapterChars) {
       chapterTruncated = true;
       const headLen = Math.floor(maxChapterChars * 0.7);
       const tailLen = Math.floor(maxChapterChars * 0.25);
@@ -208,24 +228,48 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       characterMatrix: matrixWorkingSet,
       bibleBlock,
       outlineOrControlBlock,
-      hooksBlock,
-      summariesBlock,
+      hooksBlock: safeHooksBlock,
+      summariesBlock: safeSummariesBlock,
       volumeSummariesBlock,
-      subplotBlock,
-      emotionalBlock,
-      matrixBlock,
+      subplotBlock: safeSubplotBlock,
+      emotionalBlock: safeEmotionalBlock,
+      matrixBlock: safeMatrixBlock,
     }) + truncationNote;
 
-    const response = await this.chat(
-      [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      { temperature: 0.3 },
-    );
+    let responseContent: string;
+    try {
+      const response = await this.chat(
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        { temperature: 0.3, maxTokens: 8192 },
+      );
+      responseContent = response.content;
+    } catch (error) {
+      if (!this.isContentFilterError(error)) {
+        throw error;
+      }
+      this.log?.warn(
+        `[chapter-analyzer] Chapter ${chapterNumber} analysis blocked by provider content_filter; ` +
+        "using local import fallback so chapter replay can continue.",
+      );
+      responseContent = this.buildContentFilterFallback({
+        language: resolvedLanguage,
+        chapterNumber,
+        chapterTitle,
+        chapterContent,
+        currentState,
+        ledger: genreProfile.numericalSystem ? ledger : "",
+        hooks,
+        subplotBoard,
+        emotionalArcs,
+        characterMatrix,
+      });
+    }
 
     const countingMode = resolveLengthCountingMode(book.language ?? genreProfile.language);
-    const output = parseWriterOutput(chapterNumber, response.content, genreProfile, countingMode);
+    const output = parseWriterOutput(chapterNumber, responseContent, genreProfile, countingMode);
     const canonicalContent = chapterContent;
     const canonicalWordCount = countChapterLength(canonicalContent, countingMode);
 
@@ -473,6 +517,70 @@ ${bookRulesBody ? `## 本书规则\n\n${bookRulesBody}` : ""}
 2. 正文中的每一个事实性变化都必须反映在对应的追踪文件中
 3. 不要遗漏细节：数值变化、位置变化、关系变化、信息变化都要记录
 4. 角色矩阵中的"已知/未知"要准确——角色只知道他在场时发生的事`;
+  }
+
+  private isContentFilterError(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error);
+    return /content_filter|content filter|内容审查|内容过滤/i.test(text);
+  }
+
+  private buildContentFilterFallback(params: {
+    readonly language: "zh" | "en";
+    readonly chapterNumber: number;
+    readonly chapterTitle?: string;
+    readonly chapterContent: string;
+    readonly currentState: string;
+    readonly ledger: string;
+    readonly hooks: string;
+    readonly subplotBoard: string;
+    readonly emotionalArcs: string;
+    readonly characterMatrix: string;
+  }): string {
+    const title = params.chapterTitle?.trim()
+      || (params.language === "en" ? `Chapter ${params.chapterNumber}` : `第${params.chapterNumber}章`);
+    const summary = params.language === "en"
+      ? `| ${params.chapterNumber} | ${title} | (content filter fallback) | Provider content_filter blocked automatic analysis; original chapter was imported unchanged. | Tracking files preserved from previous state. | Not analyzed. | Unknown | Imported with fallback |`
+      : `| ${params.chapterNumber} | ${title} | （内容过滤保底） | 上游 content_filter 拦截自动分析；原章节已原样导入。 | 追踪文件沿用上一状态。 | 未分析。 | 未知 | 保底导入 |`;
+    const state = params.currentState.trim()
+      || (params.language === "en" ? "(state card not updated)" : "(状态卡未更新)");
+    const hooks = params.hooks.trim()
+      || (params.language === "en" ? "(hooks pool not updated)" : "(伏笔池未更新)");
+
+    return [
+      "=== CHAPTER_TITLE ===",
+      title,
+      "",
+      "=== CHAPTER_CONTENT ===",
+      params.chapterContent,
+      "",
+      "=== PRE_WRITE_CHECK ===",
+      "",
+      "=== POST_SETTLEMENT ===",
+      params.language === "en"
+        ? "Automatic analysis skipped because the provider returned content_filter."
+        : "上游返回 content_filter，已跳过自动分析并保底导入。",
+      "",
+      "=== UPDATED_STATE ===",
+      state,
+      "",
+      "=== UPDATED_LEDGER ===",
+      params.ledger.trim(),
+      "",
+      "=== UPDATED_HOOKS ===",
+      hooks,
+      "",
+      "=== CHAPTER_SUMMARY ===",
+      summary,
+      "",
+      "=== UPDATED_SUBPLOTS ===",
+      params.subplotBoard.trim(),
+      "",
+      "=== UPDATED_EMOTIONAL_ARCS ===",
+      params.emotionalArcs.trim(),
+      "",
+      "=== UPDATED_CHARACTER_MATRIX ===",
+      params.characterMatrix.trim(),
+    ].join("\n");
   }
 
   private buildUserPrompt(params: {

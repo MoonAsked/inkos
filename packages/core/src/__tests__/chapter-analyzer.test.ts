@@ -397,6 +397,69 @@ describe("ChapterAnalyzerAgent", () => {
     }
   });
 
+  it("falls back to a local import record when provider content_filter blocks analysis", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-chapter-analyzer-filter-"));
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "| 字段 | 值 |\n| --- | --- |\n| 当前章节 | 543 |\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "| hook_id | 状态 |\n| --- | --- |\n| h1 | open |\n", "utf-8"),
+    ]);
+
+    const chapterContent = "杨洛冲进现场，局势骤然变化。";
+    const agent = new ChapterAnalyzerAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const chat = vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockRejectedValue(new Error("Provider finish_reason: content_filter"));
+
+    const book: BookConfig = {
+      id: "zh-book",
+      title: "中文书",
+      platform: "other",
+      genre: "other",
+      status: "active",
+      targetChapters: 10,
+      chapterWordCount: 2200,
+      language: "zh",
+      createdAt: "2026-03-22T00:00:00.000Z",
+      updatedAt: "2026-03-22T00:00:00.000Z",
+    };
+
+    try {
+      const output = await agent.analyzeChapter({
+        book,
+        bookDir,
+        chapterNumber: 544,
+        chapterTitle: "胆大妄为",
+        chapterContent,
+      });
+
+      expect(chat).toHaveBeenCalledOnce();
+      expect(output.title).toBe("胆大妄为");
+      expect(output.content).toBe(chapterContent);
+      expect(output.updatedState).toContain("当前章节 | 543");
+      expect(output.updatedHooks).toContain("h1 | open");
+      expect(output.chapterSummary).toContain("content_filter");
+      expect(output.postSettlement).toContain("content_filter");
+    } finally {
+      await rm(bookDir, { recursive: true, force: true });
+    }
+  });
+
   it("uses governed control inputs instead of old broad truth-file blocks when provided", async () => {
     const bookDir = await mkdtemp(join(tmpdir(), "inkos-chapter-analyzer-governed-"));
     const storyDir = join(bookDir, "story");
