@@ -167,6 +167,65 @@ describe("runChapterReviewCycle v9", () => {
     expect(result.revised).toBe(true);
   });
 
+  it("honors configured max review iterations", async () => {
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(createAuditResult({
+        passed: false,
+        overallScore: 60,
+        issues: [{ severity: "critical", category: "continuity", description: "broken", suggestion: "fix" }],
+      }))
+      .mockResolvedValueOnce(createAuditResult({
+        passed: false,
+        overallScore: 70,
+        issues: [{ severity: "warning", category: "pacing", description: "slow", suggestion: "trim" }],
+      }))
+      .mockResolvedValueOnce(createAuditResult({
+        passed: false,
+        overallScore: 80,
+        issues: [{ severity: "warning", category: "pacing", description: "still slow", suggestion: "trim more" }],
+      }));
+
+    const reviseChapter = vi.fn()
+      .mockResolvedValueOnce({
+        revisedContent: "a".repeat(200),
+        wordCount: 200,
+        fixedIssues: ["fixed continuity"],
+        updatedState: "", updatedLedger: "", updatedHooks: "",
+        tokenUsage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        revisedContent: "b".repeat(200),
+        wordCount: 200,
+        fixedIssues: ["fixed pacing"],
+        updatedState: "", updatedLedger: "", updatedHooks: "",
+        tokenUsage: ZERO_USAGE,
+      });
+
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockImplementation(async (content: string) => ({
+        content,
+        wordCount: content.length,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      }));
+
+    const result = await runChapterReviewCycle({
+      ...baseParams,
+      initialOutput: {
+        content: "c".repeat(200),
+        wordCount: 200,
+        postWriteErrors: [],
+      },
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      maxReviewIterations: 1,
+    });
+
+    expect(reviseChapter).toHaveBeenCalledTimes(1);
+    expect(result.auditResult.overallScore).toBe(70);
+  });
+
   it("stops immediately when initial score passes threshold", async () => {
     const auditChapter = vi.fn()
       .mockResolvedValue(createAuditResult({ overallScore: 88 }));
