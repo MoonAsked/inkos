@@ -227,6 +227,7 @@ export interface PipelineConfig {
   readonly projectRoot: string;
   readonly defaultLLMConfig?: LLMConfig;
   readonly foundationReviewRetries?: number;
+  readonly writingReviewRetries?: number;
   readonly notifyChannels?: ReadonlyArray<NotifyChannel>;
   readonly radarSources?: ReadonlyArray<RadarSource>;
   readonly externalContext?: string;
@@ -1613,6 +1614,7 @@ export class PipelineRunner {
           : [];
         return [...baseIssues, ...ledgerIssues];
       },
+      maxReviewIterations: this.config.writingReviewRetries,
       logWarn: (message) => this.logWarn(pipelineLang, message),
       logStage: (message) => this.logStage(stageLanguage, message),
     });

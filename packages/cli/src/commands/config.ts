@@ -27,6 +27,7 @@ configCommand
         "llm.thinkingBudget", "llm.proxyUrl", "llm.apiFormat", "llm.stream",
         "inputGovernanceMode",
         "foundation.reviewRetries",
+        "writing.reviewRetries",
         "daemon.schedule.radarCron", "daemon.schedule.writeCron",
         "daemon.maxConcurrentBooks", "daemon.chaptersPerCycle",
         "daemon.retryDelayMs", "daemon.cooldownAfterChapterMs",
