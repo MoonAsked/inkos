@@ -10,6 +10,8 @@ import {
   createRenameEntityTool,
   createWriteFileTool,
   createWriteTruthFileTool,
+  createShortFictionRunTool,
+  createGenerateCoverTool,
 } from "../agent/agent-tools.js";
 
 describe("agent deterministic writing tools", () => {
@@ -220,6 +222,36 @@ describe("agent deterministic writing tools", () => {
     if (result.content[0]?.type === "text") {
       expect(result.content[0].text).toContain("No active book");
     }
+  });
+
+
+  it("exposes a standalone short fiction tool without benchmark inputs", () => {
+    const pipeline = {
+      createAgentContext: vi.fn(),
+    };
+    const tool = createShortFictionRunTool(pipeline as never, root);
+    const schemaText = JSON.stringify(tool.parameters);
+    const toolText = JSON.stringify({ description: tool.description, parameters: tool.parameters });
+
+    expect(tool.name).toBe("short_fiction_run");
+    expect(schemaText).toContain("direction");
+    expect(schemaText).toContain("coverModel");
+    expect(toolText).not.toContain("benchmark");
+    expect(toolText).not.toContain("deconstruction");
+  });
+
+  it("exposes standalone cover generation as its own tool", () => {
+    const tool = createGenerateCoverTool(root);
+    const schemaText = JSON.stringify(tool.parameters);
+    const toolText = JSON.stringify({ description: tool.description, parameters: tool.parameters });
+
+    expect(tool.name).toBe("generate_cover");
+    expect(schemaText).toContain("title");
+    expect(schemaText).toContain("outputDir");
+    expect(schemaText).toContain("coverPrompt");
+    expect(toolText).toContain("revise the cover prompt");
+    expect(schemaText).toContain("coverModel");
+    expect(toolText).not.toContain("short_fiction_run");
   });
 
   it("allows architect revise mode to use the active book", async () => {
