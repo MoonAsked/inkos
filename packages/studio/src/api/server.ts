@@ -2099,6 +2099,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             id: toolCallId,
             tool: "sub_agent",
             result: toolResult,
+            details: toolResult.details,
             isError: false,
           });
           await appendManualSessionMessages(root, bookSession.sessionId, [{
@@ -2241,6 +2242,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 id: event.toolCallId,
                 tool: event.toolName,
                 result: event.result,
+                details: exec?.details,
                 isError: event.isError,
               });
             }

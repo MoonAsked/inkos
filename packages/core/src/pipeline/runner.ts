@@ -603,6 +603,10 @@ export class PipelineRunner {
     };
   }
 
+  public createAgentContext(agent: string, bookId?: string): AgentContext {
+    return this.agentCtxFor(agent, bookId);
+  }
+
   private async pathExists(path: string): Promise<boolean> {
     try {
       await stat(path);

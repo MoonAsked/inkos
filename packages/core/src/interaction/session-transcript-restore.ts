@@ -431,6 +431,8 @@ function messageEventsToInteractionMessages(events: MessageEvent[]): Interaction
     edit: "编辑文件",
     grep: "搜索",
     ls: "列目录",
+    short_fiction_run: "短篇生产",
+    generate_cover: "生成封面",
   };
 
   const messages: InteractionMessage[] = [];
@@ -497,6 +499,7 @@ function messageEventsToInteractionMessages(events: MessageEvent[]): Interaction
       : undefined;
     const text = textFromContent(raw.content).trim();
     const isError = raw.isError === true;
+    const details = raw.details;
 
     return {
       id: toolCallId,
@@ -510,6 +513,7 @@ function messageEventsToInteractionMessages(events: MessageEvent[]): Interaction
         : text
           ? { result: text.slice(0, 200) }
           : {}),
+      ...(details !== undefined ? { details } : {}),
       startedAt: call?.timestamp ?? event.timestamp,
       completedAt: event.timestamp,
     };
