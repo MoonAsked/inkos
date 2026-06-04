@@ -105,6 +105,10 @@ const LLM_OVERRIDE_FLAGS = new Set([
   "--stream", "--no-stream",
 ]);
 
+const SET_MODEL_OWNED_LLM_FLAGS = new Set([
+  "--api-key-env", "--base-url", "--stream", "--no-stream",
+]);
+
 /**
  * Strip LLM global override flags (and their values) from argv so Commander
  * sub-commands don't reject them.  `parseLLMOverridesFromArgv` still reads
@@ -112,11 +116,15 @@ const LLM_OVERRIDE_FLAGS = new Set([
  */
 function stripLlmOverridesFromArgv(argv: string[]): string[] {
   const out: string[] = [];
+  const configIndex = argv.indexOf("config");
+  const preserveSetModelOptions = configIndex >= 0 && argv[configIndex + 1] === "set-model";
+
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     // Handle --flag=value inline form
     const [flag] = arg.split("=", 2) as [string, string | undefined];
-    if (LLM_OVERRIDE_FLAGS.has(flag)) {
+    const isSetModelOption = preserveSetModelOptions && i > configIndex + 1 && SET_MODEL_OWNED_LLM_FLAGS.has(flag);
+    if (LLM_OVERRIDE_FLAGS.has(flag) && !isSetModelOption) {
       // Boolean flags (--stream / --no-stream) consume no next arg
       if (flag !== "--stream" && flag !== "--no-stream" && !arg.includes("=")) {
         i++; // skip the value token
