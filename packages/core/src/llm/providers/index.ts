@@ -9,6 +9,7 @@ import { MOONSHOT } from "./endpoints/moonshot.js";
 import { ZHIPU } from "./endpoints/zhipu.js";
 import { SILICONCLOUD } from "./endpoints/siliconcloud.js";
 import { PPIO } from "./endpoints/ppio.js";
+import { KKAIAPI } from "./endpoints/kkaiapi.js";
 import { BAILIAN } from "./endpoints/bailian.js";
 import { VOLCENGINE } from "./endpoints/volcengine.js";
 import { HUNYUAN } from "./endpoints/hunyuan.js";
@@ -58,7 +59,7 @@ export type { InkosEndpoint, InkosModel, ApiProtocol, EndpointGroup } from "./ty
  */
 const ALL_PROVIDERS: readonly InkosEndpoint[] = [
   ANTHROPIC, OPENAI, GOOGLE, DEEPSEEK, MINIMAX,
-  MOONSHOT, ZHIPU, SILICONCLOUD, PPIO, BAILIAN, VOLCENGINE, HUNYUAN, BAICHUAN, STEPFUN, WENXIN,
+  MOONSHOT, ZHIPU, SILICONCLOUD, PPIO, KKAIAPI, BAILIAN, VOLCENGINE, HUNYUAN, BAICHUAN, STEPFUN, WENXIN,
   SPARK, SENSENOVA, SENSENOVA_2, TENCENTCLOUD, XIAOMI_MIMO, LONGCAT, INTERNLM,
   MODELSCOPE, GITEEAI, QINIU, INFINIAI, ZEROONE, AI360, OPENCODE,
   OLLAMA, OPENROUTER, CUSTOM, MISTRAL, XAI, NVIDIA, NEWAPI, GITHUB_COPILOT,
