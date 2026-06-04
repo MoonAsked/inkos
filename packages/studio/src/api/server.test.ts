@@ -235,6 +235,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     getServiceApiKey: getServiceApiKeyMock,
     COVER_PROVIDER_PRESETS: actual.COVER_PROVIDER_PRESETS,
     coverSecretKey: actual.coverSecretKey,
+    resolveCoverProviderPreset: actual.resolveCoverProviderPreset,
     listModelsForService: listModelsForServiceMock,
     getAllEndpoints: getAllEndpointsMock,
     probeModelsFromUpstream: probeModelsFromUpstreamMock,
