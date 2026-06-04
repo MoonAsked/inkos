@@ -9,7 +9,7 @@ export type StreamEvent =
   | { type: "thinking:end" }
   | { type: "draft:delta"; text: string }
   | { type: "tool:start"; id: string; tool: string; agent?: string; stages?: string[] }
-  | { type: "tool:end"; id: string; isError?: boolean; result?: string }
+  | { type: "tool:end"; id: string; isError?: boolean; result?: unknown; details?: unknown }
   | { type: "log:stage"; stageName: string }
   | { type: "llm:progress"; status: string; elapsedMs: number; totalChars: number; chineseChars: number };
 
@@ -21,11 +21,32 @@ const AGENT_LABELS: Record<string, string> = {
 };
 const TOOL_LABELS: Record<string, string> = {
   read: "读取文件", edit: "编辑文件", grep: "搜索", ls: "列目录",
+  short_fiction_run: "短篇生产",
+  generate_cover: "生成封面",
 };
 
 function resolveToolLabel(tool: string, agent?: string): string {
   if (tool === "sub_agent" && agent) return AGENT_LABELS[agent] ?? agent;
   return TOOL_LABELS[tool] ?? tool;
+}
+
+function summarizeToolResult(result: unknown): string {
+  if (typeof result === "string") return result.slice(0, 2000);
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    if (typeof record.content === "string") return record.content.slice(0, 2000);
+    if (Array.isArray(record.content)) {
+      const text = record.content
+        .map((part) => {
+          const item = part as { type?: unknown; text?: unknown };
+          return item.type === "text" && typeof item.text === "string" ? item.text : "";
+        })
+        .filter(Boolean)
+        .join("\n");
+      if (text.trim()) return text.slice(0, 2000);
+    }
+  }
+  return String(result ?? "").slice(0, 2000);
 }
 
 // -- Builder --
@@ -119,8 +140,9 @@ export function buildPartsFromEvents(events: StreamEvent[]): MessagePart[] {
             const exec = p.execution;
             exec.status = event.isError ? "error" : "completed";
             exec.completedAt = Date.now();
-            if (event.isError) exec.error = event.result ? localizeKnownRuntimeMessage(event.result) : event.result;
-            else exec.result = event.result;
+            if (event.isError) exec.error = localizeKnownRuntimeMessage(summarizeToolResult(event.result));
+            else exec.result = summarizeToolResult(event.result);
+            if (event.details !== undefined) exec.details = event.details;
             // Mark all remaining stages as completed
             exec.stages = exec.stages?.map((s) =>
               s.status !== "completed" ? { ...s, status: "completed" as const, progress: undefined } : s
