@@ -197,6 +197,9 @@ describe("CLI integration", () => {
       expect(config.inputGovernanceMode).toBe("v2");
     });
     it("sets writing review retry count", async () => {
+      const initialized = await stat(join(projectDir, "inkos.json")).then(() => true).catch(() => false);
+      if (!initialized) run(["init"]);
+
       const output = run(["config", "set", "writing.reviewRetries", "3"]);
       expect(output).toContain("Set writing.reviewRetries = 3");
 

@@ -101,6 +101,7 @@ export async function runChapterReviewCycle(params: {
   };
   /** Re-run deterministic post-write checks (chapter-ref, paragraph shape, etc.) on any content. */
   readonly runPostWriteChecks?: (content: string) => ReadonlyArray<AuditIssue>;
+  readonly maxReviewIterations?: number;
   readonly logWarn: (message: { zh: string; en: string }) => void;
   readonly logStage: (message: { zh: string; en: string }) => void;
 }): Promise<ChapterReviewCycleResult> {
@@ -220,10 +221,11 @@ export async function runChapterReviewCycle(params: {
   let postReviseCount = 0;
 
   if (!isPassed(initial)) {
-    for (let iteration = 0; iteration < MAX_REVIEW_ITERATIONS; iteration++) {
+    const maxReviewIterations = params.maxReviewIterations ?? MAX_REVIEW_ITERATIONS;
+    for (let iteration = 0; iteration < maxReviewIterations; iteration++) {
       params.logStage({
-        zh: `修复轮次 ${iteration + 1}/${MAX_REVIEW_ITERATIONS}（当前 ${currentAudit.score} 分）`,
-        en: `repair iteration ${iteration + 1}/${MAX_REVIEW_ITERATIONS} (current score: ${currentAudit.score})`,
+        zh: `修复轮次 ${iteration + 1}/${maxReviewIterations}（当前 ${currentAudit.score} 分）`,
+        en: `repair iteration ${iteration + 1}/${maxReviewIterations} (current score: ${currentAudit.score})`,
       });
 
       const reviser = params.createReviser();

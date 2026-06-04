@@ -855,6 +855,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       projectRoot: root,
       defaultLLMConfig: currentConfig.llm,
       foundationReviewRetries: currentConfig.foundation?.reviewRetries ?? 2,
+      writingReviewRetries: currentConfig.writing?.reviewRetries ?? 1,
       modelOverrides: currentConfig.modelOverrides,
       notifyChannels: currentConfig.notify,
       logger,
