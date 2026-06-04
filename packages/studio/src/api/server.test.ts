@@ -230,6 +230,8 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     loadSecrets: loadSecretsMock,
     saveSecrets: saveSecretsMock,
     getServiceApiKey: getServiceApiKeyMock,
+    COVER_PROVIDER_PRESETS: actual.COVER_PROVIDER_PRESETS,
+    coverSecretKey: actual.coverSecretKey,
     listModelsForService: listModelsForServiceMock,
     getAllEndpoints: getAllEndpointsMock,
     probeModelsFromUpstream: probeModelsFromUpstreamMock,
@@ -1601,6 +1603,66 @@ it("uses discovered Volcengine models before the stale built-in check model", as
     const response = await app.request("http://localhost/api/v1/services/moonshot/secret");
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ apiKey: "sk-moon" });
+  });
+
+  it("saves cover generation config and a separate cover API key", async () => {
+    loadSecretsMock.mockResolvedValue({ services: {} });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const saveConfig = await app.request("http://localhost/api/v1/cover/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        service: "kkaiapi",
+        model: "gpt-image-2",
+      }),
+    });
+    expect(saveConfig.status).toBe(200);
+
+    const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
+    expect(raw.llm.cover).toEqual({
+      service: "kkaiapi",
+      model: "gpt-image-2",
+    });
+
+    const saveSecret = await app.request("http://localhost/api/v1/cover/secret/kkaiapi", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "sk-cover" }),
+    });
+    expect(saveSecret.status).toBe(200);
+    expect(saveSecretsMock).toHaveBeenCalledWith(root, {
+      services: {
+        "cover:kkaiapi": { apiKey: "sk-cover" },
+      },
+    });
+  });
+
+  it("serves generated project cover images without exposing arbitrary files", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const imagePath = join(root, "shorts", "demo", "final", "cover.png");
+    await mkdir(join(root, "shorts", "demo", "final"), { recursive: true });
+    await writeFile(imagePath, Buffer.from("fake-png"));
+    await writeFile(join(root, "shorts", "demo", "final", "cover.txt"), "nope", "utf-8");
+    await mkdir(join(root, "books", "demo"), { recursive: true });
+    await writeFile(join(root, "books", "demo", "cover.png"), Buffer.from("private-book-image"));
+
+    const ok = await app.request("http://localhost/api/v1/project/files/shorts/demo/final/cover.png");
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toContain("image/png");
+    expect(Buffer.from(await ok.arrayBuffer()).toString("utf-8")).toBe("fake-png");
+
+    const unsupported = await app.request("http://localhost/api/v1/project/files/shorts/demo/final/cover.txt");
+    expect(unsupported.status).toBe(415);
+
+    const unsupportedRoot = await app.request("http://localhost/api/v1/project/files/books/demo/cover.png");
+    expect(unsupportedRoot.status).toBe(400);
+
+    const traversal = await app.request("http://localhost/api/v1/project/files/../inkos.json");
+    expect([400, 404]).toContain(traversal.status);
   });
 
   it("rejects create requests when a complete book with the same id already exists", async () => {
