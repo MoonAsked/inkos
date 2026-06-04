@@ -19,7 +19,7 @@ describe("InkosEndpoint.group", () => {
     ].sort());
     expect(byGroup("aggregator")).toEqual([
       
-      "giteeai", "infiniai", "modelscope", "newapi", "opencode",
+      "giteeai", "infiniai", "kkaiapi", "modelscope", "newapi", "opencode",
       "openrouter", "ppio", "qiniu", "siliconcloud",
     
     ].sort());

@@ -85,9 +85,9 @@ describe("providers structural integrity", () => {
     expect(getEndpoint("bailian")?.baseUrl).toContain("/anthropic");
   });
 
-  it("B1：minimax 保留 anthropic-messages api（例外）", () => {
-    expect(getEndpoint("minimax")?.api).toBe("anthropic-messages");
-    expect(getEndpoint("minimax")?.baseUrl).toContain("/anthropic");
+  it("B1：minimax 使用官方 OpenAI-compatible api", () => {
+    expect(getEndpoint("minimax")?.api).toBe("openai-completions");
+    expect(getEndpoint("minimax")?.baseUrl).toBe("https://api.minimaxi.com/v1");
   });
 
   it("B2：中国原厂批次 2 全部收录（7 个）", () => {
@@ -117,9 +117,9 @@ describe("providers structural integrity", () => {
     expect(getEndpoint("newapi")?.baseUrl).toBe("");
   });
 
-  it("B4：总 provider 数 = 37（不含 CodingPlan 分组，R5 删 qwen / higress 后 + nvidia + sensenova_2）", () => {
+  it("B4：总 provider 数 = 38（不含 CodingPlan 分组，R5 删 qwen / higress 后 + nvidia + sensenova_2 + kkaiapi）", () => {
     const nonCoding = getAllEndpoints().filter((p) => p.group !== "codingPlan");
-    expect(nonCoding.length).toBe(37);
+    expect(nonCoding.length).toBe(38);
   });
 
   it("B6：CodingPlan 8 个 provider 全部收录", () => {

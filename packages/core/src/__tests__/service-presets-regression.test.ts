@@ -19,15 +19,16 @@ describe("service-presets regression", () => {
   });
 
   describe("MiniMax preset", () => {
-    it("has correct domestic MiniMax baseUrl (api.minimaxi.com/anthropic)", () => {
+    it("has correct domestic MiniMax OpenAI-compatible baseUrl (api.minimaxi.com/v1)", () => {
       const preset = resolveServicePreset("minimax");
       expect(preset).toBeDefined();
-      expect(preset!.baseUrl).toBe("https://api.minimaxi.com/anthropic");
+      expect(preset!.baseUrl).toBe("https://api.minimaxi.com/v1");
     });
 
-    it("uses anthropic-messages api format", () => {
+    it("uses OpenAI-compatible api format", () => {
       const preset = resolveServicePreset("minimax");
-      expect(preset!.api).toBe("anthropic-messages");
+      expect(preset!.providerFamily).toBe("openai");
+      expect(preset!.api).toBe("openai-completions");
     });
 
     it("has knownModels with all 7 MiniMax models", () => {
@@ -41,11 +42,28 @@ describe("service-presets regression", () => {
     });
   });
 
+  describe("kkaiapi preset", () => {
+    it("resolves kkaiapi as an OpenAI-compatible aggregator", () => {
+      const preset = resolveServicePreset("kkaiapi");
+      expect(preset).toBeDefined();
+      expect(preset!.providerFamily).toBe("openai");
+      expect(preset!.api).toBe("openai-completions");
+      expect(preset!.baseUrl).toBe("https://api.kkaiapi.com/v1");
+      expect(preset!.modelsBaseUrl).toBe("https://api.kkaiapi.com/v1");
+    });
+  });
+
   describe("listModelsForService", () => {
     it("returns provider bank models for minimax (B8 升级：provider.models 替代 preset.knownModels)", async () => {
       const models = await listModelsForService("minimax");
       expect(models.length).toBeGreaterThanOrEqual(7);
       expect(models.some((m) => m.id === "MiniMax-M2.7")).toBe(true);
+    });
+
+    it("returns kkaiapi provider bank text models", async () => {
+      const models = await listModelsForService("kkaiapi");
+      expect(models.some((m) => m.id === "deepseek-v4-flash")).toBe(true);
+      expect(models.some((m) => m.id === "gpt-image-2")).toBe(false);
     });
 
     it("returns empty for custom service without apikey + baseUrl", async () => {
