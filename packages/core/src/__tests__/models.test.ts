@@ -365,6 +365,17 @@ describe("ProjectConfigSchema", () => {
     expect(result.inputGovernanceMode).toBe("v2");
   });
 
+  it("defaults and accepts writing review retry configuration", () => {
+    const defaults = ProjectConfigSchema.parse(validProject);
+    expect(defaults.writing.reviewRetries).toBe(1);
+
+    const overridden = ProjectConfigSchema.parse({
+      ...validProject,
+      writing: { reviewRetries: 3 },
+    });
+    expect(overridden.writing.reviewRetries).toBe(3);
+  });
+
   it("rejects wrong version", () => {
     expect(() =>
       ProjectConfigSchema.parse({ ...validProject, version: "1.0.0" }),
