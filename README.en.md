@@ -25,7 +25,9 @@ Open-source AI Agent that autonomously writes, audits, and revises novels — wi
 
 **InkOS TUI is here!** — run `inkos tui` to launch a full-screen interactive dashboard. Conversational creation, natural-language book operations, slash command autocomplete, themed animations — TUI, Studio, and OpenClaw share the same interaction kernel.
 
-**v1.3.10 book creation platform hotfix** — fixes `sub_agent.platform` schema validation failures during Studio and CLI book creation. Studio, CLI, TUI, and agent create-book paths now normalize platform aliases to supported values.
+**InkOS Short** — Studio chat and CLI can now create a standalone short-fiction package: complete draft, outline and review records, synopsis, selling points, cover prompt, and an optional generated cover image when a cover provider is configured.
+
+**v1.4.1 Windows provider and long-form speed update** — MiniMax now uses its OpenAI-compatible endpoint by default, long-form writing keeps the faster one-pass repair default while allowing `writing.reviewRetries` to be raised when needed, and the short-fiction / Studio Chat workflow from v1.4 remains available.
 
 **Native English novel writing now supported！** — 10 built-in English genre profiles with dedicated pacing rules, fatigue word lists, and audit dimensions. Set `--lang en` and go.
 
@@ -149,6 +151,37 @@ inkos export my-book --format epub  # Export EPUB (read on phone/Kindle)
 
 Language is set per-genre by default. Override explicitly with `--lang en` or `--lang zh`. Use `inkos genre list` to see all available genres and their default languages.
 
+### Write Complete Short Fiction
+
+In Studio chat, ask for a complete short-fiction deliverable:
+
+```text
+Write a 12-chapter short fiction piece about a modern marriage reversal where the heroine wins with hard evidence.
+```
+
+Or run it from the CLI:
+
+```bash
+inkos short run \
+  --direction "modern short fiction marriage reversal evidence-driven heroine" \
+  --chapters 12 \
+  --chars 1000
+```
+
+Outputs are saved under `shorts/<story-name>/final/`, including `full.md`, `sales-package.md`, `cover-prompt.md`, and `cover.png` when cover generation is configured.
+
+### Generate a Standalone Cover
+
+To generate only a cover for an existing title or synopsis, do not rerun the short-fiction pipeline. Ask Studio chat directly:
+
+```text
+Generate a short-fiction cover for "The Divorce Papers He Regretted", modern city, high-drama reversal.
+```
+
+The cover tool writes `covers/<title>/cover-prompt.md` and `covers/<title>/cover.png`. If no cover provider is configured yet, set the cover provider and API key in Studio model settings first.
+
+After generation, you can keep editing the cover prompt through chat, for example: "move the character closer, make the title text bigger, and give her a colder smile." InkOS will pass the revised direction as `coverPrompt`, rewrite `cover-prompt.md`, and regenerate the cover without rewriting the story.
+
 <p align="center">
   <img src="assets/screenshot-terminal.png" width="700" alt="Terminal screenshot">
 </p>
@@ -182,7 +215,7 @@ Every genre includes a **fatigue word list** (e.g., "delve", "tapestry", "testam
 
 ### 33-Dimension Audit + De-AI-ification
 
-The Continuity Auditor agent checks every draft across 33 dimensions: character memory, resource continuity, hook payoff, outline adherence, narrative pacing, emotional arcs, and more. Built-in AI-tell detection automatically catches "LLM voice" — overused words, monotonous sentence patterns, excessive summarization. Failed audits trigger an automatic revision loop.
+The Continuity Auditor agent checks every draft across 33 dimensions: character memory, resource continuity, hook payoff, outline adherence, narrative pacing, emotional arcs, and more. Built-in AI-tell detection automatically catches "LLM voice" — overused words, monotonous sentence patterns, excessive summarization. The default long-form write cycle now runs at most one automatic revision pass; unresolved critical findings are kept in the result for human review or later commands.
 
 De-AI-ification rules are baked into the Writer agent's prompts: fatigue word lists, banned patterns, style fingerprint injection — reducing AI traces at the source. `revise --mode anti-detect` runs dedicated anti-detection rewriting on existing chapters.
 
@@ -208,7 +241,7 @@ inkos plan chapter my-book --context "Pull attention back to the mentor conflict
 inkos compose chapter my-book
 ```
 
-This generates `story/runtime/chapter-XXXX.intent.md`, `context.json`, `rule-stack.yaml`, and `trace.json`. `intent.md` is the human-readable contract; the others are execution/debug artifacts. `plan` / `compose` only compile local documents and state, so they can run before you finish API key setup.
+This generates `story/runtime/chapter-XXXX.intent.md`, `context.json`, `rule-stack.yaml`, and `trace.json`. `intent.md` is the human-readable contract; the others are execution/debug artifacts. `plan` calls the LLM to produce the chapter intent; `compose` only compiles local documents and state, so it can run before you finish API key setup.
 
 ### Length Governance
 
@@ -262,15 +295,15 @@ Each chapter is produced by multiple agents in sequence, with zero human interve
 | **Radar** | Scans platform trends and reader preferences to inform story direction (pluggable, skippable) |
 | **Planner** | Reads author intent + current focus + memory retrieval results, produces chapter intent (must-keep / must-avoid) |
 | **Composer** | Selects relevant context from all truth files by relevance, compiles rule stack and runtime artifacts |
-| **Architect** | Plans chapter structure: outline, scene beats, pacing targets |
+| **Architect** | Generates foundation files during book creation, import, or spinoff setup: story frame, rules, characters, and long-horizon control files |
 | **Writer** | Produces prose from the composed context (length-governed, dialogue-driven) |
 | **Observer** | Over-extracts 9 categories of facts from the chapter text (characters, locations, resources, relationships, emotions, information, hooks, time, physical state) |
 | **Reflector** | Outputs a JSON delta (not full markdown); code-layer applies Zod schema validation then immutable write |
-| **Normalizer** | Single-pass compress/expand to bring chapter length into the target band |
+| **Normalizer** | Single-pass compress/expand only when the chapter clearly leaves the hard length range |
 | **Continuity Auditor** | Validates the draft against 7 canonical truth files, 33-dimension check |
-| **Reviser** | Fixes issues found by the auditor — auto-fixes critical problems, flags others for human review |
+| **Reviser** | Fixes critical issues found by the auditor; the default write cycle runs at most one automatic revision pass and flags the rest for human review |
 
-If the audit fails, the pipeline automatically enters a revise → re-audit loop until all critical issues are resolved.
+If the audit fails, the default pipeline runs one revise → re-audit pass. Remaining issues are preserved in the result and state for human review or later commands.
 
 ### Canonical Truth Files
 
@@ -393,7 +426,7 @@ inkos agent "Create a progression fantasy about a mage who can only use one spel
 | `inkos studio` | Start web workbench (`-p` for port, default 4567) |
 | `inkos up / down` | Start/stop daemon (`-q` quiet mode, auto-writes `inkos.log`) |
 
-`[id]` is auto-detected when the project has only one book. All commands support `--json` for structured output. `draft` / `write next` / `plan chapter` / `compose chapter` accept `--context` for steering, and `--words` overrides the target chapter size. `book create` supports `--brief <file>` to pass a creative brief — the Architect builds from your ideas instead of generating from scratch. `plan chapter` / `compose chapter` do not require a live LLM, so you can inspect governed inputs before finishing API setup.
+`[id]` is auto-detected when the project has only one book. All commands support `--json` for structured output. `draft` / `write next` / `plan chapter` / `compose chapter` accept `--context` for steering, and `--words` overrides the target chapter size. `book create` supports `--brief <file>` to pass a creative brief — the Architect builds from your ideas instead of generating from scratch. `plan chapter` calls the LLM to create chapter intent; `compose chapter` does not require a live LLM, so you can inspect governed inputs before finishing API setup.
 
 ## Roadmap
 
