@@ -533,6 +533,30 @@ function isTransientLLMTransportError(error: unknown): boolean {
   ].some((needle) => text.includes(needle));
 }
 
+export function isTransientLLMHttpError(error: unknown): boolean {
+  const text = collectErrorText(error).toLowerCase();
+  if (text.includes("model_not_available") || text.includes("model not available")) {
+    return false;
+  }
+  const statusHit = /\b(429|502|503|504)\b/.test(text);
+  const phraseHit = [
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "too many requests",
+    "rate limit",
+    "overloaded",
+    "please retry",
+    "try again later",
+  ].some((needle) => text.includes(needle));
+  return statusHit || phraseHit;
+}
+
+function isRetryableLLMError(error: unknown): boolean {
+  return isTransientLLMTransportError(error) || isTransientLLMHttpError(error);
+}
+
 function isRateLimitError(error: unknown): boolean {
   const text = collectErrorText(error);
   return text.includes("429") || text.includes("rate_limit") || text.includes("rate limit");
@@ -553,7 +577,7 @@ async function withTransientLLMRetry<T>(
         !enabled
         || attempt >= TRANSIENT_LLM_RETRIES
         || error instanceof PartialResponseError
-        || !isTransientLLMTransportError(error)
+        || !isRetryableLLMError(error)
       ) {
         throw error;
       }

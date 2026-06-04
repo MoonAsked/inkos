@@ -133,8 +133,8 @@ describe("providers structural integrity", () => {
     }
   });
 
-  it("B6：总 provider 数 = 45 (37 base + 8 CodingPlan)", () => {
-    expect(getAllEndpoints().length).toBe(45);
+  it("B6：总 provider 数 = 46 (38 base + 8 CodingPlan)", () => {
+    expect(getAllEndpoints().length).toBe(46);
   });
 
   it("B6：CodingPlan provider 都走 anthropic-messages", () => {

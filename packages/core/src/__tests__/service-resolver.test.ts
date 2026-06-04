@@ -208,7 +208,7 @@ describe("resolveServiceModel", () => {
     expect(result.model.api).toBe("openai-responses");
   });
 
-  it("resolves MiniMax using the preset provider family and anthropic endpoint", async () => {
+  it("resolves MiniMax using the OpenAI-compatible preset endpoint", async () => {
     await mkdir(join(root, ".inkos"), { recursive: true });
     await writeFile(
       join(root, ".inkos", "secrets.json"),
@@ -221,7 +221,7 @@ describe("resolveServiceModel", () => {
     expect(result.model.baseUrl).toBe("https://api.minimaxi.com/v1");
     expect(result.model.api).toBe("openai-completions");
     expect(result.model.provider).toBe("openai");
-    expect(result.model.reasoning).toBe(true);
+    expect(result.model.reasoning).toBe(false);
     expect(result.model.contextWindow).toBe(204800);
     expect(result.model.maxTokens).toBe(131072);
   });
