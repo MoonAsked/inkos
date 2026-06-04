@@ -1,7 +1,7 @@
 // Models
 export { type BookConfig, type Platform, type Genre, type BookStatus, type FanficMode, BookConfigSchema, PlatformSchema, GenreSchema, BookStatusSchema, FanficModeSchema, normalizePlatformId, normalizePlatformOrOther } from "./models/book.js";
 export { type ChapterMeta, type ChapterStatus, ChapterMetaSchema, ChapterStatusSchema } from "./models/chapter.js";
-export { type ProjectConfig, type LLMConfig, type NotifyChannel, type DetectionConfig, type QualityGates, type FoundationConfig, type AgentLLMOverride, type InputGovernanceMode, ProjectConfigSchema, LLMConfigSchema, AgentLLMOverrideSchema, DetectionConfigSchema, QualityGatesSchema, FoundationConfigSchema, InputGovernanceModeSchema } from "./models/project.js";
+export { type ProjectConfig, type LLMConfig, type NotifyChannel, type DetectionConfig, type QualityGates, type FoundationConfig, type WritingConfig, type AgentLLMOverride, type InputGovernanceMode, ProjectConfigSchema, LLMConfigSchema, AgentLLMOverrideSchema, DetectionConfigSchema, QualityGatesSchema, FoundationConfigSchema, WritingConfigSchema, InputGovernanceModeSchema } from "./models/project.js";
 export { type CurrentState, type ParticleLedger, type PendingHooks, type PendingHook, type LedgerEntry } from "./models/state.js";
 export { type GenreProfile, type ParsedGenreProfile, GenreProfileSchema, parseGenreProfile } from "./models/genre-profile.js";
 export { type BookRules, type ParsedBookRules, BookRulesSchema, parseBookRules, tryParseBookRulesFrontmatter } from "./models/book-rules.js";
@@ -217,6 +217,41 @@ export {
   type ParsedDraftResponse,
 } from "./interaction/draft-directive-parser.js";
 
+export {
+  SHORT_FICTION_DEFAULT_CHAPTERS,
+  SHORT_FICTION_MIN_CHAPTERS,
+  SHORT_FICTION_MAX_CHAPTERS,
+  SHORT_FICTION_DEFAULT_CHARS_PER_CHAPTER,
+  SHORT_FICTION_MIN_CHARS_PER_CHAPTER,
+  SHORT_FICTION_MAX_CHARS_PER_CHAPTER,
+  ShortFictionOutlineAgent,
+  ShortFictionOutlineReviewerAgent,
+  ShortFictionOutlineReviserAgent,
+  ShortFictionWriterAgent,
+  ShortFictionDraftReviewerAgent,
+  ShortFictionDraftReviserAgent,
+  ShortFictionPackagingAgent,
+  parseShortFictionBatchDraft,
+  validateShortFictionDraftForFinal,
+  renderShortFictionDraftMarkdown,
+  type ShortFictionOutline,
+  type ShortFictionBatchDraft,
+  type ShortFictionChapter,
+  type ShortFictionSalesPackage,
+  type ShortFictionReference,
+} from "./agents/short-fiction.js";
+export {
+  generateShortFictionCover,
+  runShortFictionProduction,
+  extractResponsesImageBase64,
+  resolveCoverApiKey,
+  type ShortFictionCoverOptions,
+  type ShortFictionCoverResult,
+  type ShortFictionRunOptions,
+  type ShortFictionRunResult,
+  type ShortFictionRunRuntimes,
+} from "./pipeline/short-fiction-runner.js";
+
 // Agent (pi-agent integration)
 export * from "./agent/index.js";
 
@@ -237,6 +272,13 @@ export {
 } from "./llm/service-presets.js";
 export { resolveServiceModel, type ResolvedModel } from "./llm/service-resolver.js";
 export { loadSecrets, saveSecrets, getServiceApiKey, type SecretsFile } from "./llm/secrets.js";
+export {
+  COVER_PROVIDER_PRESETS,
+  coverSecretKey,
+  resolveCoverProviderPreset,
+  type CoverProviderId,
+  type CoverProviderPreset,
+} from "./llm/cover-providers.js";
 export { migrateConfig, type MigrationResult } from "./llm/config-migration.js";
 export { getAllEndpoints, getEndpoint, type InkosEndpoint, type InkosModel, type EndpointGroup } from "./llm/providers/index.js";
 export { probeModelsFromUpstream, type ProbedModel } from "./llm/providers/probe.js";
