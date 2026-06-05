@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { PipelineRunner, StateManager, splitChapters, groupChaptersByVolume, deriveBookIdFromTitle, normalizePlatformOrOther, type BookConfig } from "@actalk/inkos-core";
-import { readFile, readdir, stat, mkdir } from "node:fs/promises";
+import { readFile, readdir, stat, mkdir, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { Writable } from "node:stream";
 import { join, resolve } from "node:path";
@@ -185,7 +185,7 @@ importCommand
         }
       }
 
-      // Chapter import — save pipeline logs to session folder with per-chapter files
+      // Chapter import — save per-chapter pipeline logs into a session folder
       const logDir = resolve(root, "logs");
       await mkdir(logDir, { recursive: true });
       const now = new Date();
@@ -193,24 +193,23 @@ importCommand
       const sessionDirName = `import-${bookId}-${ts}`;
       const sessionDir = join(logDir, sessionDirName);
       await mkdir(sessionDir, { recursive: true });
-      const combinedLogPath = join(sessionDir, `import-${bookId}-${ts}.jsonl`);
       log(`日志保存至: ${sessionDir}/`);
 
-      const combinedStream = createWriteStream(combinedLogPath, { flags: "a" });
-      let currentChapterStream: ReturnType<typeof createWriteStream> | null = null;
+      // Preamble file captures startup log and Step 1 foundation entries
+      // before chapter-level rotation begins via onChapterStart.
+      let currentChapterStream: ReturnType<typeof createWriteStream> | null = createWriteStream(
+        join(sessionDir, "chapter-000.jsonl"),
+        { flags: "a" },
+      );
 
-      // Custom writable that writes each entry to the combined log AND the
-      // current chapter's file (rotated via onChapterStart)
-      const chapterSplitStream = new Writable({
+      const logStream_ = new Writable({
         write(chunk: Buffer, _encoding, callback) {
-          combinedStream.write(chunk);
           if (currentChapterStream?.writable) {
             currentChapterStream.write(chunk);
           }
           callback();
         },
         final(callback) {
-          combinedStream.end();
           if (currentChapterStream) {
             currentChapterStream.end();
             currentChapterStream = null;
@@ -219,9 +218,9 @@ importCommand
         },
       });
 
-      logStream = chapterSplitStream;
+      logStream = logStream_;
       pipelineConfig = buildPipelineConfig(config, root, {
-        logFile: chapterSplitStream,
+        logFile: logStream_,
       });
       const pipeline = new PipelineRunner(pipelineConfig);
 
@@ -240,6 +239,20 @@ importCommand
           currentChapterStream = createWriteStream(chapterPath, { flags: "a" });
         },
       });
+
+      // Write a merge script so users can reconstruct a combined JSONL on demand
+      await writeFile(join(sessionDir, "merge.sh"), [
+        '#!/bin/bash',
+        '# Merge per-chapter JSONL files into a single combined file.',
+        '# Usage: ./merge.sh [output-file]',
+        '# Default output: combined.jsonl',
+        '',
+        'output="${1:-combined.jsonl}"',
+        'cat chapter-*.jsonl > "$output"',
+        'echo "Merged to: $output"',
+        'wc -l "$output"',
+        '',
+      ].join("\n"), { mode: 0o755 });
 
       if (opts.json) {
         log(JSON.stringify(result, null, 2));
