@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { PipelineRunner, StateManager, splitChapters, groupChaptersByVolume, deriveBookIdFromTitle, normalizePlatformOrOther, type BookConfig } from "@actalk/inkos-core";
 import { readFile, readdir, stat, mkdir } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
+import { Writable } from "node:stream";
 import { join, resolve } from "node:path";
 import { loadConfig, buildPipelineConfig, findProjectRoot, resolveBookId, log, logError } from "../utils.js";
 import {
@@ -70,7 +71,7 @@ importCommand
   .option("--json", "Output JSON")
   .action(async (bookIdArg: string | undefined, opts) => {
     let pipelineConfig: ReturnType<typeof buildPipelineConfig> | undefined;
-    let logStream: ReturnType<typeof createWriteStream> | undefined;
+    let logStream: Writable | undefined;
     try {
       const root = findProjectRoot();
       const config = await loadConfig();
@@ -184,17 +185,43 @@ importCommand
         }
       }
 
-      // Chapter import — always save pipeline logs to project root
+      // Chapter import — save pipeline logs to session folder with per-chapter files
       const logDir = resolve(root, "logs");
       await mkdir(logDir, { recursive: true });
       const now = new Date();
       const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
-      const logPath = join(logDir, `import-${bookId}-${ts}.jsonl`);
-      log(`日志保存至: ${logPath}`);
-      const logStream_ = createWriteStream(logPath, { flags: "a" });
-      logStream = logStream_;
+      const sessionDirName = `import-${bookId}-${ts}`;
+      const sessionDir = join(logDir, sessionDirName);
+      await mkdir(sessionDir, { recursive: true });
+      const combinedLogPath = join(sessionDir, `import-${bookId}-${ts}.jsonl`);
+      log(`日志保存至: ${sessionDir}/`);
+
+      const combinedStream = createWriteStream(combinedLogPath, { flags: "a" });
+      let currentChapterStream: ReturnType<typeof createWriteStream> | null = null;
+
+      // Custom writable that writes each entry to the combined log AND the
+      // current chapter's file (rotated via onChapterStart)
+      const chapterSplitStream = new Writable({
+        write(chunk: Buffer, _encoding, callback) {
+          combinedStream.write(chunk);
+          if (currentChapterStream?.writable) {
+            currentChapterStream.write(chunk);
+          }
+          callback();
+        },
+        final(callback) {
+          combinedStream.end();
+          if (currentChapterStream) {
+            currentChapterStream.end();
+            currentChapterStream = null;
+          }
+          callback();
+        },
+      });
+
+      logStream = chapterSplitStream;
       pipelineConfig = buildPipelineConfig(config, root, {
-        logFile: logStream_,
+        logFile: chapterSplitStream,
       });
       const pipeline = new PipelineRunner(pipelineConfig);
 
@@ -204,6 +231,14 @@ importCommand
         resumeFrom: opts.resumeFrom,
         importMode: opts.series ? "series" : "continuation",
         foundationInterval,
+        onChapterStart(chapterNumber) {
+          if (currentChapterStream) {
+            currentChapterStream.end();
+            currentChapterStream = null;
+          }
+          const chapterPath = join(sessionDir, `chapter-${String(chapterNumber).padStart(3, "0")}.jsonl`);
+          currentChapterStream = createWriteStream(chapterPath, { flags: "a" });
+        },
       });
 
       if (opts.json) {
