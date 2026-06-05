@@ -195,6 +195,21 @@ importCommand
       await mkdir(sessionDir, { recursive: true });
       log(`日志保存至: ${sessionDir}/`);
 
+      // Write a fixed merge script before import starts, so it's available
+      // even if the import is interrupted midway.
+      await writeFile(join(sessionDir, "merge.sh"), [
+        '#!/bin/bash',
+        '# Merge per-chapter JSONL files into a single combined file.',
+        '# Usage: ./merge.sh [output-file]',
+        '# Default output: combined.jsonl',
+        '',
+        'output="${1:-combined.jsonl}"',
+        'cat chapter-*.jsonl > "$output"',
+        'echo "Merged to: $output"',
+        'wc -l "$output"',
+        '',
+      ].join("\n"), { mode: 0o755 });
+
       // Preamble file captures startup log and Step 1 foundation entries
       // before chapter-level rotation begins via onChapterStart.
       let currentChapterStream: ReturnType<typeof createWriteStream> | null = createWriteStream(
@@ -239,20 +254,6 @@ importCommand
           currentChapterStream = createWriteStream(chapterPath, { flags: "a" });
         },
       });
-
-      // Write a merge script so users can reconstruct a combined JSONL on demand
-      await writeFile(join(sessionDir, "merge.sh"), [
-        '#!/bin/bash',
-        '# Merge per-chapter JSONL files into a single combined file.',
-        '# Usage: ./merge.sh [output-file]',
-        '# Default output: combined.jsonl',
-        '',
-        'output="${1:-combined.jsonl}"',
-        'cat chapter-*.jsonl > "$output"',
-        'echo "Merged to: $output"',
-        'wc -l "$output"',
-        '',
-      ].join("\n"), { mode: 0o755 });
 
       if (opts.json) {
         log(JSON.stringify(result, null, 2));
