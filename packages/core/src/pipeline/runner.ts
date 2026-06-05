@@ -334,6 +334,11 @@ export interface ImportChaptersInput {
    * every chapter, ensuring characters introduced later appear in roles/.
    */
   readonly foundationInterval?: number;
+  /**
+   * Called at the start of each chapter's processing during import.
+   * Useful for per-chapter log file rotation or progress tracking.
+   */
+  readonly onChapterStart?: (chapterNumber: number) => void | Promise<void>;
 }
 
 export interface ImportChaptersResult {
@@ -2685,6 +2690,12 @@ ${matrix}`,
       for (let i = startFrom - 1; i < input.chapters.length; i++) {
         const ch = input.chapters[i]!;
         const chapterNumber = i + 1;
+
+        // Notify caller that a new chapter is starting (e.g. for log file rotation)
+        if (input.onChapterStart) {
+          await input.onChapterStart(chapterNumber);
+        }
+
         const governedInput = await this.prepareWriteInput(book, bookDir, chapterNumber);
 
         log?.info(this.localize(resolvedLanguage, {
