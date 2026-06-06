@@ -2691,12 +2691,14 @@ ${matrix}`,
         const ch = input.chapters[i]!;
         const chapterNumber = i + 1;
 
+        const governedInput = await this.prepareWriteInput(book, bookDir, chapterNumber);
+
         // Notify caller that a new chapter is starting (e.g. for log file rotation)
+        // NOTE: placed after prepareWriteInput so intermediate logs (planner streaming,
+        // thinking progress) remain in the previous chapter's log file.
         if (input.onChapterStart) {
           await input.onChapterStart(chapterNumber);
         }
-
-        const governedInput = await this.prepareWriteInput(book, bookDir, chapterNumber);
 
         log?.info(this.localize(resolvedLanguage, {
           zh: `分析章节 ${chapterNumber}/${input.chapters.length}：${ch.title}...`,
