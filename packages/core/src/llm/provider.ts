@@ -1102,6 +1102,22 @@ function extractAnswerFromReasoning(text: string): string | undefined {
     const isTemplateExample = block.includes("<一句话") || block.includes("<one sentence")
       || (block.includes("chapter: 12") && block.includes("把七号门被动过手脚"));
     if (isTemplateExample && !hasRealSections) continue;
+
+    // Validate that the content between the opening and closing --- delimiters
+    // actually looks like YAML frontmatter (has key: value pairs). Thinking models
+    // often use --- as horizontal rules in their reasoning text, which would be
+    // parsed as YAML by the matching algorithm above. We skip --- pairs where the
+    // content between them contains no recognizable YAML key: value patterns,
+    // preventing prose or narrative from being mistaken for frontmatter.
+    const fmMatch = block.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+    if (fmMatch) {
+      const yamlContent = fmMatch[1]!;
+      const hasYamlKeyValue = yamlContent
+        .split("\n")
+        .some((line) => /^\s*[a-zA-Z_一-鿿][\w一-鿿]*\s*:/.test(line) && !line.trim().startsWith("#"));
+      if (!hasYamlKeyValue) continue;
+    }
+
     return block;
   }
 
@@ -1330,7 +1346,7 @@ function extractAnswerFromReasoning(text: string): string | undefined {
   return trimmed;
 }
 
-function extractChatContent(json: any): string {
+function extractChatContent(json: any, logger?: import("../utils/logger.js").Logger): string {
   const message = json?.choices?.[0]?.message;
   const content = extractOpenAITextPart(message?.content);
   if (content) return content;
@@ -1340,10 +1356,10 @@ function extractChatContent(json: any): string {
   if (reasoningContent) {
     const extracted = extractAnswerFromReasoning(reasoningContent);
     if (extracted) {
-      console.warn(`[inkos] Non-stream response has empty content but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
+      providerWarn(logger, `Non-stream response has empty content but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
       return extracted;
     }
-    console.warn(`[inkos] Non-stream response has empty content and ${reasoningContent.length} chars of reasoning_content, but no final answer could be extracted`);
+    providerWarn(logger, `Non-stream response has empty content and ${reasoningContent.length} chars of reasoning_content, but no final answer could be extracted`);
   }
   return "";
 }
@@ -1356,7 +1372,7 @@ function extractChatDeltaReasoningContent(json: any): string {
   return extractOpenAITextPart(json?.choices?.[0]?.delta?.reasoning_content);
 }
 
-function extractResponsesContent(json: any): string {
+function extractResponsesContent(json: any, logger?: import("../utils/logger.js").Logger): string {
   const output = Array.isArray(json?.output) ? json.output : [];
   const textContent = output
     .flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
@@ -1382,15 +1398,15 @@ function extractResponsesContent(json: any): string {
   if (thinkingContent) {
     const extracted = extractAnswerFromReasoning(thinkingContent);
     if (extracted) {
-      console.warn(`[inkos] Responses API has 0 text but ${thinkingContent.length} chars of reasoning content — extracted ${extracted.length} chars as answer (thinking model)`);
+      providerWarn(logger, `Responses API has 0 text but ${thinkingContent.length} chars of reasoning content — extracted ${extracted.length} chars as answer (thinking model)`);
       return extracted;
     }
-    console.warn(`[inkos] Responses API has 0 text and ${thinkingContent.length} chars of reasoning content, but no final answer could be extracted`);
+    providerWarn(logger, `Responses API has 0 text and ${thinkingContent.length} chars of reasoning content, but no final answer could be extracted`);
   }
   return "";
 }
 
-function extractAnthropicContent(json: any): string {
+function extractAnthropicContent(json: any, logger?: import("../utils/logger.js").Logger): string {
   const content = Array.isArray(json?.content) ? json.content : [];
   const textContent = content
     .map((part: any) => typeof part?.text === "string" ? part.text : "")
@@ -1404,10 +1420,10 @@ function extractAnthropicContent(json: any): string {
   if (thinkingContent) {
     const extracted = extractAnswerFromReasoning(thinkingContent);
     if (extracted) {
-      console.warn(`[inkos] Anthropic response has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+      providerWarn(logger, `Anthropic response has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
       return extracted;
     }
-    console.warn(`[inkos] Anthropic response has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
+    providerWarn(logger, `Anthropic response has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
   }
   return "";
 }
@@ -1454,7 +1470,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
 
   if (!client.stream) {
     const json = await response.json() as any;
-    const content = extractAnthropicContent(json);
+    const content = extractAnthropicContent(json, client._logger);
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
     }
@@ -1540,10 +1556,10 @@ async function chatCompletionViaCustomAnthropicCompatible(
   if (!content && thinkingContent) {
     const extracted = extractAnswerFromReasoning(thinkingContent);
     if (extracted) {
-      console.warn(`[inkos] Anthropic stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+      providerWarn(client._logger, `Anthropic stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
       content = extracted;
     } else {
-      console.warn(`[inkos] Anthropic stream has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
+      providerWarn(client._logger, `Anthropic stream has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
     }
   }
 
@@ -1598,7 +1614,7 @@ async function chatCompletionViaCustomOpenAICompatible(
 
     if (!client.stream) {
       const json = await response.json() as any;
-      const content = extractResponsesContent(json);
+      const content = extractResponsesContent(json, client._logger);
       if (!content) {
         throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
       }
@@ -1656,7 +1672,7 @@ async function chatCompletionViaCustomOpenAICompatible(
               totalTokens: json.response?.usage?.total_tokens ?? 0,
             };
             if (!content) {
-              content = extractResponsesContent(json.response);
+              content = extractResponsesContent(json.response, client._logger);
             }
           }
         }
@@ -1711,7 +1727,7 @@ async function chatCompletionViaCustomOpenAICompatible(
 
   if (!client.stream) {
     const json = await response.json() as any;
-    const content = extractChatContent(json);
+    const content = extractChatContent(json, client._logger);
     if (!content) {
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
     }
@@ -1799,10 +1815,10 @@ async function chatCompletionViaCustomOpenAICompatible(
   if (!content && reasoningContent) {
     const extracted = extractAnswerFromReasoning(reasoningContent);
     if (extracted) {
-      console.warn(`[inkos] Stream has 0 content chars but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
+      providerWarn(client._logger, `Stream has 0 content chars but ${reasoningContent.length} chars of reasoning_content — extracted ${extracted.length} chars as answer (thinking model)`);
       content = extracted;
     } else {
-      console.warn(`[inkos] Stream has 0 content chars and ${reasoningContent.length} chars of reasoning_content, but no final answer could be extracted`);
+      providerWarn(client._logger, `Stream has 0 content chars and ${reasoningContent.length} chars of reasoning_content, but no final answer could be extracted`);
     }
   }
 
@@ -2040,14 +2056,14 @@ async function chatCompletionViaPiAi(
       .map((block) => block.text)
       .join("");
     // Thinking model fallback: check for thinking blocks (ThinkingContent has .thinking, not .text)
-    const thinkingContent = response.content
+    const thinkingBlocks = response.content
       .filter((block): block is PiThinkingContent => block.type === "thinking")
       .map((block) => block.thinking)
       .join("");
-    if (!content && thinkingContent) {
-      const extracted = extractAnswerFromReasoning(thinkingContent);
+    if (!content && thinkingBlocks) {
+      const extracted = extractAnswerFromReasoning(thinkingBlocks);
       if (extracted) {
-        console.warn(`[inkos] Pi-ai non-stream has 0 text but ${thinkingContent.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
+        providerWarn(client._logger, `Pi-ai non-stream has 0 text but ${thinkingBlocks.length} chars of thinking content — extracted ${extracted.length} chars as answer (thinking model)`);
         return {
           content: extracted,
           usage: {
@@ -2057,11 +2073,11 @@ async function chatCompletionViaPiAi(
           },
         };
       }
-      console.warn(`[inkos] Pi-ai non-stream has 0 text and ${thinkingContent.length} chars of thinking content, but no final answer could be extracted`);
+      providerWarn(client._logger, `Pi-ai non-stream has 0 text and ${thinkingBlocks.length} chars of thinking content, but no final answer could be extracted`);
     }
     if (!content) {
       const diag = `usage=${response.usage.input}+${response.usage.output}`;
-      console.warn(`[inkos] LLM 非流式响应无文本内容 (${diag})`);
+      providerWarn(client._logger, `LLM 非流式响应无文本内容 (${diag})`);
       throw new Error(`LLM returned empty response (${diag})`);
     }
     return {
@@ -2125,7 +2141,7 @@ async function chatCompletionViaPiAi(
     const thinkingContent = thinkingChunks.join("");
     const extracted = extractAnswerFromReasoning(thinkingContent);
     if (extracted) {
-      console.warn(`[inkos] Pi-ai stream has 0 text_delta but ${thinkingContent.length} chars of thinking_delta — extracted ${extracted.length} chars as answer (thinking model)`);
+      providerWarn(client._logger, `Pi-ai stream has 0 text_delta but ${thinkingContent.length} chars of thinking_delta — extracted ${extracted.length} chars as answer (thinking model)`);
       return {
         content: extracted,
         usage: {
@@ -2135,12 +2151,12 @@ async function chatCompletionViaPiAi(
         },
       };
     }
-    console.warn(`[inkos] Pi-ai stream has 0 text_delta and ${thinkingContent.length} chars of thinking_delta, but no final answer could be extracted`);
+    providerWarn(client._logger, `Pi-ai stream has 0 text_delta and ${thinkingContent.length} chars of thinking_delta, but no final answer could be extracted`);
   }
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;
     const hint = "If using a thinking/reasoning model, ensure thinkingBudget=0 or the model returns content after reasoning.";
-    console.warn(`[inkos] LLM 流式响应无文本内容 (${diag})`);
+    providerWarn(client._logger, `LLM 流式响应无文本内容 (${diag})`);
     throw new Error(`LLM returned empty response from stream (${diag}). ${hint}`);
   }
 

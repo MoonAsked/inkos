@@ -325,7 +325,10 @@ export class PlannerAgent extends BaseAgent {
 
     // Recover from invalid YAML in frontmatter — most commonly caused by
     // inconsistent indentation in threadRefs list items (e.g. "- H03" at
-    // indent 0 vs "  - S004" at indent 2). Re-normalize the YAML and retry.
+    // indent 0 vs "  - S004" at indent 2), or by the LLM putting the
+    // markdown body content between --- delimiters (thinking model artifact).
+    // First try YAML repair; if that fails, fall through to the body-start
+    // recovery used for "missing YAML frontmatter delimiters".
     if (parseErrorMessage.startsWith("invalid YAML in frontmatter")) {
       const match = trimmed.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
       if (match) {
@@ -333,6 +336,9 @@ export class PlannerAgent extends BaseAgent {
         if (fixedYaml) {
           return `---\n${fixedYaml}\n---\n${match[2]}`;
         }
+        // repairMemoYaml returned undefined — the YAML content likely isn't
+        // YAML at all (e.g. thinking model placed body text between --- rules).
+        // Fall through to body-start extraction below.
       }
     }
 
@@ -387,7 +393,8 @@ export class PlannerAgent extends BaseAgent {
       }
     }
 
-    if (parseErrorMessage !== "missing YAML frontmatter delimiters") {
+    if (parseErrorMessage !== "missing YAML frontmatter delimiters"
+      && !parseErrorMessage.startsWith("invalid YAML in frontmatter")) {
       return undefined;
     }
 
